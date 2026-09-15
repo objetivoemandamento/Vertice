@@ -1,7 +1,7 @@
 {
   "name": "vertice-root",
   "private": true,
-  "version": "1.1.2",
+  "version": "1.1.3",
   "scripts": {
     "start": "node -r ./server/src/vertice-preload.js -e \"const fs=require('fs');const p='server/src/server.js';let s=fs.readFileSync(p,'utf8');const a=\\\"const order=await mpRequest('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':idempotencyKey},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),processing_mode:'manual',items:[{title:product.slice(0,120),quantity:1,unit_price:amount.toFixed(2)}]})});\\\";const b=\\\"const order=await mpRequest('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':idempotencyKey},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:'VTXTEST001',processing_mode:'manual',payer:{email:'test@testuser.com'},items:[{external_code:'VTXTEST001',title:product.slice(0,120),description:description||product.slice(0,500),quantity:1,unit_price:amount.toFixed(2)}]})});\\\";if(s.includes(a)){s=s.replace(a,b);fs.writeFileSync(p,s,'utf8');console.log('VÉRTICE MP payload patched for test');}require('./server/src/server.js');\""
   },
@@ -10,7 +10,7 @@
     "better-sqlite3": "^11.10.0",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "jsonwebtoken": "^9.0.0",
+    "jsonwebtoken": "^9.0.2",
     "uuid": "^11.1.0"
   }
 }
