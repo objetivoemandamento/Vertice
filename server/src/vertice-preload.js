@@ -24,6 +24,12 @@ function cleanMode(value) {
   const mode = String(value || 'comando').trim().toLowerCase();
   return ['comando','operacao','monitoramento'].includes(mode) ? mode : null;
 }
+function customerFor(user) { return user.role === 'OWNER' ? 'owner' : user.sub; }
+function activeCustomer(user) {
+  if (user.role === 'OWNER') return true;
+  const sub = db.prepare('SELECT status,current_period_end FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(user.sub);
+  return Boolean(sub && sub.status === 'active' && (!sub.current_period_end || new Date(sub.current_period_end) >= new Date()));
+}
 function fallback(message, mode) {
   const text = String(message || '').trim();
   const lower = text.toLowerCase();
@@ -81,10 +87,7 @@ function install(app) {
   app.post('/ai/chat', async (req,res) => {
     const user = verify(req);
     if (!user) return jsonError(res,401,'Sessão inválida');
-    if (user.role !== 'OWNER') {
-      const sub = db.prepare('SELECT status,current_period_end FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(user.sub);
-      if (!sub || sub.status !== 'active' || (sub.current_period_end && new Date(sub.current_period_end) < new Date())) return jsonError(res,402,'Assinatura não está ativa.');
-    }
+    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
     const message = String(req.body?.message || '').trim();
     const mode = cleanMode(req.body?.mode);
     if (!message || message.length > 6000 || !mode) return jsonError(res,400,'Mensagem ou modo inválido.');
@@ -111,6 +114,42 @@ function install(app) {
     const id = crypto.randomUUID(); const now = new Date().toISOString();
     db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id,'owner',deviceId || null,mode,command,'queued',now);
     return res.status(202).json({id,status:'queued',message:'Comando recebido pelo VÉRTICE.',executionPolicy:{scope:'somente_o_solicitado',preserveUnrequested:true}});
+  });
+
+  app.get('/commands/next', (req,res) => {
+    const user = verify(req);
+    if (!user) return jsonError(res,401,'Sessão inválida');
+    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
+    const deviceId = String(req.query?.deviceId || '').trim();
+    if (!deviceId) return jsonError(res,400,'deviceId é obrigatório.');
+    const customer = customerFor(user);
+    const device = db.prepare('SELECT id,customer_id,mode FROM devices WHERE id=?').get(deviceId);
+    if (!device || device.customer_id !== customer || device.mode !== 'operacao') return jsonError(res,403,'Terminal OPERAÇÃO não autorizado.');
+    const row = db.prepare('SELECT id,command,mode,status FROM commands WHERE customer_id=? AND device_id=? AND mode="operacao" AND status="queued" ORDER BY created_at ASC LIMIT 1').get(customer,deviceId);
+    if (!row) return res.json({ok:true,command:null});
+    const now = new Date().toISOString();
+    const changed = db.prepare('UPDATE commands SET status=? WHERE id=? AND customer_id=? AND status="queued"').run('running',row.id,customer);
+    if (!changed.changes) return res.json({ok:true,command:null});
+    row.status = 'running';
+    return res.json({ok:true,command:row});
+  });
+
+  app.post('/commands/:commandId/status', (req,res) => {
+    const user = verify(req);
+    if (!user) return jsonError(res,401,'Sessão inválida');
+    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
+    const id = String(req.params.commandId || '').trim();
+    const status = String(req.body?.status || '').trim().toLowerCase();
+    const message = String(req.body?.message || '').trim().slice(0,1000);
+    if (!id || !['completed','failed','running'].includes(status)) return jsonError(res,400,'Status inválido.');
+    const customer = customerFor(user);
+    const command = db.prepare('SELECT id,customer_id,device_id,status FROM commands WHERE id=?').get(id);
+    if (!command || command.customer_id !== customer) return jsonError(res,404,'Comando não encontrado.');
+    if (command.status === 'completed' || command.status === 'failed') return res.json({ok:true,status:command.status});
+    const now = new Date().toISOString();
+    db.prepare('UPDATE commands SET status=? WHERE id=? AND customer_id=?').run(status,id,customer);
+    if (message) console.log(`[vertice] command ${id} ${status}: ${message}`);
+    return res.json({ok:true,status});
   });
 }
 
