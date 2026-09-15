@@ -28,7 +28,7 @@ class PermissionGateActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(darkColorScheme = null) {
+            MaterialTheme {
                 PermissionGuide(onContinue = {
                     getSharedPreferences("vertice_session", MODE_PRIVATE)
                         .edit()
