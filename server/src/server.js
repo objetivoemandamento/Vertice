@@ -8,72 +8,302 @@ const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
-app.use(express.json({limit:'8mb'}));
+app.use(express.json({ limit: '8mb' }));
+
 const db = new Database(process.env.DB_PATH || 'vertice.db');
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) console.warn('JWT_SECRET não definido: use um segredo forte em produção.');
-const secret = JWT_SECRET || 'CHANGE-ME-IN-PRODUCTION';
+const secret = JWT_SECRET || crypto.randomBytes(32).toString('hex');
 const OWNER_LOGIN = process.env.OWNER_LOGIN || 'admchefe';
 const OWNER_PASSWORD = process.env.OWNER_PASSWORD || 'coringa';
 
-db.exec(`CREATE TABLE IF NOT EXISTS customers(id TEXT PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS subscriptions(id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,current_period_end TEXT,updated_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS devices(id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,device_name TEXT,mode TEXT,last_seen_at TEXT,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS commands(id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,device_id TEXT,mode TEXT,command TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS monthly_sales(id TEXT PRIMARY KEY,customer_id TEXT,period_month TEXT NOT NULL,gross_revenue REAL DEFAULT 0,net_revenue REAL DEFAULT 0,sales_count INTEGER DEFAULT 0,active_subscriptions INTEGER DEFAULT 0,cancellations INTEGER DEFAULT 0,delinquent INTEGER DEFAULT 0,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sales(id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,amount REAL NOT NULL,product TEXT,channel TEXT,status TEXT NOT NULL DEFAULT 'pending',mp_order_id TEXT,mp_payment_id TEXT,checkout_url TEXT,paid_at TEXT,created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS payment_orders(id TEXT PRIMARY KEY,sale_id TEXT NOT NULL,customer_id TEXT NOT NULL,provider TEXT NOT NULL,provider_order_id TEXT,provider_payment_id TEXT,status TEXT NOT NULL,amount REAL NOT NULL,checkout_url TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`);
+db.exec(`
+CREATE TABLE IF NOT EXISTS customers(
+  id TEXT PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS subscriptions(
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  plan TEXT NOT NULL,
+  status TEXT NOT NULL,
+  current_period_end TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS devices(
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  device_name TEXT,
+  mode TEXT,
+  last_seen_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS commands(
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  device_id TEXT,
+  mode TEXT,
+  command TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS monthly_sales(
+  id TEXT PRIMARY KEY,
+  customer_id TEXT,
+  period_month TEXT NOT NULL,
+  gross_revenue REAL DEFAULT 0,
+  net_revenue REAL DEFAULT 0,
+  sales_count INTEGER DEFAULT 0,
+  active_subscriptions INTEGER DEFAULT 0,
+  cancellations INTEGER DEFAULT 0,
+  delinquent INTEGER DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sales(
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL,
+  amount REAL NOT NULL,
+  product TEXT,
+  channel TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  mp_order_id TEXT,
+  mp_payment_id TEXT,
+  checkout_url TEXT,
+  paid_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_orders(
+  id TEXT PRIMARY KEY,
+  sale_id TEXT NOT NULL,
+  customer_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  provider_order_id TEXT,
+  provider_payment_id TEXT,
+  status TEXT NOT NULL,
+  amount REAL NOT NULL,
+  checkout_url TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`);
 
-function tokenFor(c, role='CUSTOMER'){return jwt.sign({sub:c.id,email:c.email,role},secret,{expiresIn:'30d'});}
-function auth(req,res,next){try{const h=req.headers.authorization||'';if(!h.startsWith('Bearer '))return res.status(401).json({error:'Não autenticado'});req.user=jwt.verify(h.slice(7),secret);next();}catch(e){return res.status(401).json({error:'Sessão inválida'});}}
-function ownerOnly(req,res,next){if(req.user.role!=='OWNER')return res.status(403).json({error:'Acesso de proprietário necessário.'});next();}
-function subscription(customerId){return db.prepare('SELECT * FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(customerId) || null;}
-function effectiveStatus(s){if(!s)return 'blocked'; if(s.status==='active' && s.current_period_end && new Date(s.current_period_end)<new Date()) return 'pending'; return s.status;}
-function mpConfigured(){return Boolean(process.env.MERCADOPAGO_ACCESS_TOKEN);}
-function money(v){ return Number(Number(v).toFixed(2)); }
-async function mpRequest(path, options={}){
-  if(!mpConfigured()) throw new Error('Mercado Pago não configurado no servidor.');
-  const response=await fetch(`https://api.mercadopago.com${path}`,{...options,headers:{'Content-Type':'application/json','Authorization':`Bearer ${process.env.MERCADOPAGO_ACCESS_TOKEN}`,...(options.headers||{})}});
-  const text=await response.text(); let data={}; try{data=text?JSON.parse(text):{};}catch(_){}
-  if(!response.ok){const detail=data?.message||data?.error||`HTTP ${response.status}`;const err=new Error(`Mercado Pago: ${detail}`);err.status=response.status;err.provider=data;throw err;}
+const salesColumns = db.prepare('PRAGMA table_info(sales)').all().map(c => c.name);
+if (!salesColumns.includes('external_reference')) db.exec('ALTER TABLE sales ADD COLUMN external_reference TEXT');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_external_reference ON sales(external_reference) WHERE external_reference IS NOT NULL');
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_mp_order_id ON sales(mp_order_id) WHERE mp_order_id IS NOT NULL');
+
+function tokenFor(c, role = 'CUSTOMER') { return jwt.sign({ sub: c.id, email: c.email, role }, secret, { expiresIn: '30d' }); }
+function auth(req, res, next) {
+  try {
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).json({ error: 'Não autenticado' });
+    req.user = jwt.verify(h.slice(7), secret);
+    next();
+  } catch { return res.status(401).json({ error: 'Sessão inválida' }); }
+}
+function ownerOnly(req, res, next) { if (req.user.role !== 'OWNER') return res.status(403).json({ error: 'Acesso de proprietário necessário.' }); next(); }
+function subscription(customerId) { return db.prepare('SELECT * FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(customerId) || null; }
+function effectiveStatus(s) { if (!s) return 'blocked'; if (s.status === 'active' && s.current_period_end && new Date(s.current_period_end) < new Date()) return 'pending'; return s.status; }
+function mpConfigured() { return Boolean(process.env.MERCADOPAGO_ACCESS_TOKEN); }
+function money(v) { const n = Number(v); return Number.isFinite(n) ? Number(n.toFixed(2)) : NaN; }
+async function mpRequest(path, options = {}) {
+  if (!mpConfigured()) throw new Error('Mercado Pago não configurado no servidor.');
+  const response = await fetch(`https://api.mercadopago.com${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.MERCADOPAGO_ACCESS_TOKEN}`, ...(options.headers || {}) }
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch {}
+  if (!response.ok) {
+    const detail = data?.message || data?.error || `HTTP ${response.status}`;
+    const err = new Error(`Mercado Pago: ${detail}`); err.status = response.status; err.provider = data; throw err;
+  }
   return data;
 }
-function parseSignature(header){const out={};String(header||'').split(',').forEach(part=>{const [k,...rest]=part.split('=');if(k&&rest.length)out[k.trim()]=rest.join('=').trim();});return out;}
-function validMpWebhook(req){
-  const secret=process.env.MERCADOPAGO_WEBHOOK_SECRET;if(!secret)return false;
-  const sig=parseSignature(req.headers['x-signature']); const requestId=String(req.headers['x-request-id']||'');
-  const dataId=String(req.query['data.id']||req.body?.data?.id||''); const ts=String(sig.ts||''); const v1=String(sig.v1||'');
-  if(!dataId||!requestId||!ts||!v1)return false;
-  const manifest=`id:${dataId};request-id:${requestId};ts:${ts};`;
-  const expected=crypto.createHmac('sha256',secret).update(manifest).digest('hex');
-  const a=Buffer.from(expected,'utf8'),b=Buffer.from(v1,'utf8');return a.length===b.length&&crypto.timingSafeEqual(a,b);
+function parseSignature(header) { const out = {}; String(header || '').split(',').forEach(part => { const [k, ...rest] = part.split('='); if (k && rest.length) out[k.trim()] = rest.join('=').trim(); }); return out; }
+function validMpWebhook(req) {
+  const hookSecret = process.env.MERCADOPAGO_WEBHOOK_SECRET;
+  if (!hookSecret) return false;
+  const sig = parseSignature(req.headers['x-signature']);
+  const requestId = String(req.headers['x-request-id'] || '');
+  const dataId = String(req.query['data.id'] || req.body?.data?.id || '');
+  const ts = String(sig.ts || ''); const v1 = String(sig.v1 || '');
+  if (!dataId || !requestId || !ts || !v1) return false;
+  const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
+  const expected = crypto.createHmac('sha256', hookSecret).update(manifest).digest('hex');
+  const a = Buffer.from(expected, 'utf8'); const b = Buffer.from(v1, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
-async function reconcileMpOrder(providerOrderId){
-  const order=await mpRequest(`/v1/orders/${encodeURIComponent(providerOrderId)}`,{method:'GET'});
-  const sale=db.prepare('SELECT * FROM sales WHERE mp_order_id=?').get(providerOrderId);if(!sale)return {order,matched:false};
-  const paid=money(order.total_paid_amount||0);const status=String(order.status||'').toLowerCase();
-  const paidNow=(status==='processed'&&paid>=money(sale.amount))||(Array.isArray(order.transactions?.payments)&&order.transactions.payments.some(p=>['approved','processed','accredited'].includes(String(p.status||'').toLowerCase())&&money(p.paid_amount||p.amount||0)>=money(sale.amount)));
-  let localStatus='pending';if(paidNow)localStatus='paid';else if(['cancelled','canceled','expired'].includes(status))localStatus=status==='expired'?'expired':'cancelled';
-  const now=new Date().toISOString();const paymentId=order.transactions?.payments?.[0]?.id?String(order.transactions.payments[0].id):null;
-  db.prepare('UPDATE sales SET status=?,mp_payment_id=COALESCE(?,mp_payment_id),paid_at=CASE WHEN ?="paid" THEN COALESCE(paid_at,?) ELSE paid_at END WHERE id=?').run(localStatus,paymentId,localStatus,now,sale.id);
-  db.prepare('UPDATE payment_orders SET status=?,provider_payment_id=COALESCE(?,provider_payment_id),updated_at=? WHERE sale_id=?').run(localStatus,paymentId,now,sale.id);
-  return {order,matched:true,status:localStatus,saleId:sale.id};
+function encodeCustomer(customerId) { if (customerId === 'owner') return 'owner'; return Buffer.from(String(customerId).replace(/-/g, ''), 'hex').toString('base64url').replace(/=+$/g, ''); }
+function decodeCustomer(token) {
+  if (!token || token === 'owner') return 'owner';
+  try {
+    const hex = Buffer.from(token, 'base64url').toString('hex');
+    if (hex.length === 32) return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+  } catch {}
+  return null;
+}
+function makeExternalReference(customerId, saleId) { return `VTX-${encodeCustomer(customerId)}-${saleId.replace(/-/g, '')}`; }
+function parseExternalReference(ref) {
+  const value = String(ref || ''); const parts = value.split('-');
+  if (parts[0] !== 'VTX') return null;
+  if (parts.length === 2 && parts[1]) return { customerId: 'owner', saleId: parts[1] };
+  if (parts.length >= 4) {
+    const customerId = decodeCustomer(parts[1]); const compactSale = parts.slice(2).join('');
+    if (customerId && /^[0-9a-f]{32}$/i.test(compactSale)) {
+      const s = compactSale.toLowerCase();
+      return { customerId, saleId: `${s.slice(0,8)}-${s.slice(8,12)}-${s.slice(12,16)}-${s.slice(16,20)}-${s.slice(20)}` };
+    }
+  }
+  return null;
+}
+function paymentFromOrder(order, requiredAmount) {
+  const required = money(requiredAmount); const paidTotal = money(order?.total_paid_amount || 0);
+  const payments = Array.isArray(order?.transactions?.payments) ? order.transactions.payments : [];
+  const approvedEnough = payments.some(p => ['approved', 'processed', 'accredited'].includes(String(p?.status || '').toLowerCase()) && money(p?.paid_amount ?? p?.amount ?? 0) >= required);
+  return (String(order?.status || '').toLowerCase() === 'processed' && paidTotal >= required) || approvedEnough;
+}
+function statusForOrder(order, amount) {
+  const status = String(order?.status || '').toLowerCase();
+  if (paymentFromOrder(order, amount)) return 'paid';
+  if (['cancelled', 'canceled'].includes(status)) return 'cancelled';
+  if (status === 'expired') return 'expired';
+  return 'pending';
+}
+function firstPaymentId(order) { const p = Array.isArray(order?.transactions?.payments) ? order.transactions.payments[0] : null; return p?.id ? String(p.id) : null; }
+function orderProduct(order) { return String(order?.items?.[0]?.title || order?.items?.[0]?.description || 'Venda VÉRTICE').slice(0, 120); }
+
+function createOrRecoverSaleFromOrder(order, fallbackCustomerId = null, fallbackSaleId = null) {
+  const providerOrderId = String(order?.id || ''); if (!providerOrderId) return null;
+  let sale = db.prepare('SELECT * FROM sales WHERE mp_order_id=?').get(providerOrderId); if (sale) return sale;
+  const parsed = parseExternalReference(order?.external_reference);
+  const customerId = parsed?.customerId || fallbackCustomerId; const saleId = parsed?.saleId || fallbackSaleId;
+  if (!customerId || !saleId) return null;
+  const amount = money(order.total_amount); if (!Number.isFinite(amount) || amount <= 0) return null;
+  const createdAt = String(order.date_created || new Date().toISOString());
+  const status = statusForOrder(order, amount); const paidAt = status === 'paid' ? createdAt : null;
+  const product = orderProduct(order); const externalReference = String(order.external_reference || makeExternalReference(customerId, saleId));
+  const existingById = db.prepare('SELECT * FROM sales WHERE id=?').get(saleId);
+  if (existingById) {
+    db.prepare(`UPDATE sales SET customer_id=?,amount=?,product=?,channel=?,status=?,mp_order_id=?,mp_payment_id=?,checkout_url=?,paid_at=?,external_reference=? WHERE id=?`).run(
+      customerId, amount, product, 'mercado_pago', status, providerOrderId, firstPaymentId(order), String(order.checkout_url || existingById.checkout_url || ''), paidAt || existingById.paid_at || null, externalReference, saleId);
+  } else {
+    db.prepare(`INSERT INTO sales(id,customer_id,amount,product,channel,status,mp_order_id,mp_payment_id,checkout_url,paid_at,created_at,external_reference) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      saleId, customerId, amount, product, 'mercado_pago', status, providerOrderId, firstPaymentId(order), String(order.checkout_url || ''), paidAt, createdAt, externalReference);
+  }
+  const existingPayment = db.prepare('SELECT * FROM payment_orders WHERE sale_id=?').get(saleId); const now = new Date().toISOString();
+  if (existingPayment) {
+    db.prepare(`UPDATE payment_orders SET provider_order_id=?,provider_payment_id=?,status=?,amount=?,checkout_url=?,updated_at=? WHERE sale_id=?`).run(
+      providerOrderId, firstPaymentId(order), status, amount, String(order.checkout_url || ''), now, saleId);
+  } else {
+    db.prepare(`INSERT INTO payment_orders(id,sale_id,customer_id,provider,provider_order_id,provider_payment_id,status,amount,checkout_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      uuid(), saleId, customerId, 'mercado_pago', providerOrderId, firstPaymentId(order), status, amount, String(order.checkout_url || ''), now, now);
+  }
+  return db.prepare('SELECT * FROM sales WHERE id=?').get(saleId);
 }
 
-app.get('/health',(req,res)=>res.json({ok:true,service:'vertice',version:'1.1.0'}));
-app.post('/auth/register',async(req,res)=>{const email=String(req.body.email||'').trim().toLowerCase();const password=String(req.body.password||'');if(!email||password.length<8)return res.status(400).json({error:'Informe e-mail e senha com pelo menos 8 caracteres.'});try{const id=uuid();const hash=await bcrypt.hash(password,12);const now=new Date().toISOString();db.prepare('INSERT INTO customers VALUES(?,?,?,?)').run(id,email,hash,now);db.prepare('INSERT INTO subscriptions VALUES(?,?,?,?,?,?)').run(uuid(),id,'basic','pending',null,now);return res.status(201).json({token:tokenFor({id,email}),role:'CUSTOMER',customer:{id,email}});}catch(e){return res.status(409).json({error:'Conta já existente ou dados inválidos.'});}});
-app.post('/auth/login',async(req,res)=>{const login=String(req.body.login||req.body.email||'').trim().toLowerCase();const password=String(req.body.password||'');if(login===OWNER_LOGIN.toLowerCase()&&password===OWNER_PASSWORD)return res.json({token:tokenFor({id:'owner',email:OWNER_LOGIN},'OWNER'),role:'OWNER',customer:{id:'owner',email:OWNER_LOGIN}});const c=db.prepare('SELECT * FROM customers WHERE email=?').get(login);if(!c||!(await bcrypt.compare(password,c.password_hash)))return res.status(401).json({error:'Login ou senha inválidos.'});return res.json({token:tokenFor(c,'CUSTOMER'),role:'CUSTOMER',customer:{id:c.id,email:c.email}});});
-app.get('/me',auth,(req,res)=>{if(req.user.role==='OWNER')return res.json({role:'OWNER',customer:{id:'owner',email:req.user.email},subscription:{plan:'owner',status:'active',currentPeriodEnd:null}});const s=subscription(req.user.sub);res.json({role:'CUSTOMER',customer:{id:req.user.sub,email:req.user.email},subscription:s?{plan:s.plan,status:effectiveStatus(s),currentPeriodEnd:s.current_period_end}:null});});
-app.post('/devices/register',auth,(req,res)=>{if(req.user.role!=='CUSTOMER')return res.status(403).json({error:'Dispositivo comercial necessário.'});const deviceId=String(req.body.deviceId||'');const mode=String(req.body.mode||'');if(!deviceId||!['comando','operacao','monitoramento'].includes(mode))return res.status(400).json({error:'deviceId e mode são obrigatórios.'});const now=new Date().toISOString();const old=db.prepare('SELECT id,customer_id FROM devices WHERE id=?').get(deviceId);if(old&&old.customer_id!==req.user.sub)return res.status(403).json({error:'Dispositivo pertence a outra conta.'});if(old)db.prepare('UPDATE devices SET mode=?,device_name=?,last_seen_at=? WHERE id=?').run(mode,String(req.body.deviceName||''),now,deviceId);else db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(deviceId,req.user.sub,String(req.body.deviceName||''),mode,now,now);res.json({ok:true,deviceId});});
-app.post('/commands',auth,(req,res)=>{if(req.user.role!=='CUSTOMER')return res.status(403).json({error:'Use o painel do proprietário para administração.'});const s=subscription(req.user.sub);if(effectiveStatus(s)!=='active')return res.status(402).json({error:'Assinatura não está ativa.'});const command=String(req.body.command||'').trim();const mode=String(req.body.mode||'').trim();const deviceId=String(req.body.deviceId||'').trim();const scope=String(req.body.scope||'somente_o_solicitado');const preserveUnrequested=req.body.preservar_demais_configuracoes!==false;const imageBase64=typeof req.body.imageBase64==='string'?req.body.imageBase64:null;if(!command||command.length>2000)return res.status(400).json({error:'Comando inválido.'});if(deviceId){const d=db.prepare('SELECT customer_id FROM devices WHERE id=?').get(deviceId);if(!d||d.customer_id!==req.user.sub)return res.status(403).json({error:'Dispositivo não pertence à conta.'});}const id=uuid(),now=new Date().toISOString();db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id,req.user.sub,deviceId,mode,command,'queued',now);res.status(202).json({id,status:'queued',message:imageBase64?'Comando e imagem recebidos pelo Vértice.':'Comando recebido pelo Vértice.',executionPolicy:{scope,preserveUnrequested,hasImage:Boolean(imageBase64)}});});
-app.get('/commands',auth,(req,res)=>{if(req.user.role!=='CUSTOMER')return res.json({commands:[]});const rows=db.prepare('SELECT id,device_id AS deviceId,mode,command,status,created_at AS createdAt FROM commands WHERE customer_id=? ORDER BY created_at DESC LIMIT 50').all(req.user.sub);res.json({commands:rows});});
-app.post('/sales/orders',auth,async(req,res)=>{if(req.user.role!=='CUSTOMER' && req.user.role!=='OWNER')return res.status(403).json({error:'Painel comercial necessário.'});const product=String(req.body.product||'').trim();const amount=money(req.body.amount);const description=String(req.body.description||product).trim().slice(0,500);if(!product||!Number.isFinite(amount)||amount<=0)return res.status(400).json({error:'Informe produto e valor válido.'});if(amount>1000000)return res.status(400).json({error:'Valor máximo permitido é R$ 1.000.000,00.'});if(!mpConfigured())return res.status(503).json({error:'Mercado Pago ainda não foi configurado no servidor.'});const saleId=uuid(),now=new Date().toISOString(),externalReference=`VTX-${saleId}`,idempotencyKey=uuid();try{const order=await mpRequest('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':idempotencyKey},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:externalReference,processing_mode:'manual',items:[{title:product.slice(0,120),quantity:1,unit_price:amount.toFixed(2)}]})});const checkoutUrl=String(order.checkout_url||'');if(!checkoutUrl)throw new Error('Mercado Pago não retornou checkout_url.');db.prepare('INSERT INTO sales(id,customer_id,amount,product,channel,status,mp_order_id,checkout_url,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(saleId,req.user.role==='OWNER'?'owner':req.user.sub,amount,product,'mercado_pago','pending',String(order.id||''),checkoutUrl,now);db.prepare('INSERT INTO payment_orders(id,sale_id,customer_id,provider,provider_order_id,status,amount,checkout_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(uuid(),saleId,req.user.role==='OWNER'?'owner':req.user.sub,'mercado_pago',String(order.id||''),'pending',amount,checkoutUrl,now,now);res.status(201).json({saleId,orderId:String(order.id||''),status:'pending',checkoutUrl});}catch(e){console.error('MP create order error',JSON.stringify(e.provider||{message:e.message,status:e.status},null,2));res.status(e.status&&e.status<500?e.status:502).json({error:e.message||'Não foi possível criar a cobrança.',details:e.provider?.details||undefined});}});
-app.get('/sales',auth,(req,res)=>{if(req.user.role!=='CUSTOMER' && req.user.role!=='OWNER')return res.status(403).json({error:'Painel comercial necessário.'});const month=String(req.query.month||new Date().toISOString().slice(0,7));const customerId=req.user.role==='OWNER'?'owner':req.user.sub;const rows=db.prepare(`SELECT id,amount,product,channel,status,mp_order_id AS mpOrderId,checkout_url AS checkoutUrl,paid_at AS paidAt,created_at AS createdAt FROM sales WHERE customer_id=? AND substr(created_at,1,7)=? ORDER BY created_at DESC LIMIT 100`).all(customerId,month);const totals=db.prepare(`SELECT COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) gross,COUNT(CASE WHEN status='paid' THEN 1 END) paidCount,COUNT(*) totalCount FROM sales WHERE customer_id=? AND substr(created_at,1,7)=?`).get(customerId,month);res.json({month,sales:rows,summary:{grossRevenue:totals.gross||0,paidCount:totals.paidCount||0,totalCount:totals.totalCount||0}});});
-app.post('/sales/orders/:saleId/sync',auth,async(req,res)=>{if(req.user.role!=='CUSTOMER'&&req.user.role!=='OWNER')return res.status(403).json({error:'Painel comercial necessário.'});const customerId=req.user.role==='OWNER'?'owner':req.user.sub;const sale=db.prepare('SELECT * FROM sales WHERE id=? AND customer_id=?').get(req.params.saleId,customerId);if(!sale)return res.status(404).json({error:'Venda não encontrada.'});if(!sale.mp_order_id)return res.status(400).json({error:'Venda sem pedido Mercado Pago.'});try{const result=await reconcileMpOrder(sale.mp_order_id);res.json({saleId:sale.id,status:result.status||sale.status,orderId:sale.mp_order_id});}catch(e){console.error('MP sync error',JSON.stringify(e.provider||{message:e.message,status:e.status},null,2));res.status(502).json({error:e.message||'Não foi possível sincronizar a venda.'});}});
-app.post('/webhooks/mercadopago',async(req,res)=>{if(!validMpWebhook(req))return res.status(401).json({error:'Webhook Mercado Pago não autorizado.'});res.sendStatus(200);const type=String(req.query.type||req.body?.type||'');const orderId=String(req.query['data.id']||req.body?.data?.id||'');if(type&&type!=='order')return;if(!orderId)return;try{await reconcileMpOrder(orderId);}catch(e){console.error('MP webhook processing error',e.message);}});
-app.get('/reports/monthly',auth,(req,res)=>{if(req.user.role!=='CUSTOMER')return res.status(403).json({error:'Painel comercial necessário.'});const month=String(req.query.month||new Date().toISOString().slice(0,7));const sales=db.prepare('SELECT * FROM monthly_sales WHERE customer_id=? AND period_month=?').get(req.user.sub,month)||{period_month:month,gross_revenue:0,net_revenue:0,sales_count:0,active_subscriptions:0,cancellations:0,delinquent:0};const agg=db.prepare('SELECT COALESCE(SUM(CASE WHEN status=\'paid\' THEN amount ELSE 0 END),0) gross, COUNT(CASE WHEN status=\'paid\' THEN 1 END) count FROM sales WHERE customer_id=? AND substr(created_at,1,7)=?').get(req.user.sub,month);const gross=agg.gross||sales.gross_revenue||0;const count=agg.count||sales.sales_count||0;res.json({report:{month:sales.period_month,grossRevenue:gross,netRevenue:sales.net_revenue||gross,salesCount:count,activeSubscriptions:sales.active_subscriptions,cancellations:sales.cancellations,delinquent:sales.delinquent,ticketAverage:count?gross/count:0}});});
-app.get('/ranking',auth,(req,res)=>{if(req.user.role!=='CUSTOMER')return res.status(403).json({error:'Painel comercial necessário.'});const month=String(req.query.month||new Date().toISOString().slice(0,7));const rows=db.prepare(`SELECT c.id,c.email,COALESCE(SUM(CASE WHEN s.status='paid' THEN s.amount ELSE 0 END),0) gross,COUNT(CASE WHEN s.status='paid' THEN 1 END) sales FROM customers c LEFT JOIN sales s ON s.customer_id=c.id AND substr(s.created_at,1,7)=? GROUP BY c.id ORDER BY gross DESC`).all(month);const currentIndex=rows.findIndex(r=>r.id===req.user.sub);const current=rows[currentIndex]||{gross:0,sales:0};res.json({participation:'private_default',ranking:{position:currentIndex>=0?currentIndex+1:null,total:rows.length,score:Math.round(Number(current.gross)*0.1+Number(current.sales)*2)},benchmark:{topScore:rows.length?Math.round(Number(rows[0].gross)*0.1+Number(rows[0].sales)*2):0},leaderboard:rows.slice(0,10).map((r,i)=>({position:i+1,score:Math.round(Number(r.gross)*0.1+Number(r.sales)*2)}))});});
-app.get('/admin/overview',auth,ownerOnly,(req,res)=>{const customers=db.prepare('SELECT COUNT(*) n FROM customers').get().n;const active=db.prepare("SELECT COUNT(*) n FROM subscriptions WHERE status='active'").get().n;const devices=db.prepare('SELECT COUNT(*) n FROM devices').get().n;const commandsToday=db.prepare("SELECT COUNT(*) n FROM commands WHERE created_at>=date('now')").get().n;const salesMonth=db.prepare("SELECT COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) n FROM sales WHERE substr(created_at,1,7)=substr(date('now'),1,7)").get().n;res.json({customers,activeSubscriptions:active,devices,commandsToday,salesMonth});});
-app.get('/admin/customers',auth,ownerOnly,(req,res)=>{const rows=db.prepare(`SELECT c.id,c.email,c.created_at createdAt,COALESCE(s.status,'blocked') subscriptionStatus,COALESCE(s.plan,'-') plan,(SELECT COUNT(*) FROM devices d WHERE d.customer_id=c.id) devices,(SELECT COUNT(*) FROM commands x WHERE x.customer_id=c.id) commands FROM customers c LEFT JOIN subscriptions s ON s.customer_id=c.id`).all();res.json({customers:rows});});
-app.post('/subscription/webhook',express.json(),(req,res)=>{const key=req.headers['x-vertice-webhook-secret'];if(!process.env.WEBHOOK_SECRET||key!==process.env.WEBHOOK_SECRET)return res.status(401).json({error:'Webhook não autorizado'});const {customerId,status,plan,currentPeriodEnd}=req.body||{};if(!customerId||!['active','pending','blocked','cancelled'].includes(status))return res.status(400).json({error:'Payload inválido'});const now=new Date().toISOString();const s=subscription(customerId);if(s)db.prepare('UPDATE subscriptions SET plan=?,status=?,current_period_end=?,updated_at=? WHERE id=?').run(plan||s.plan,status,currentPeriodEnd||null,now,s.id);else db.prepare('INSERT INTO subscriptions VALUES(?,?,?,?,?,?)').run(uuid(),customerId,plan||'basic',status,currentPeriodEnd||null,now);res.json({ok:true});});
-app.listen(process.env.PORT||8080,()=>console.log(`Vértice server na porta ${process.env.PORT||8080}`));
+async function reconcileMpOrder(providerOrderId, fallbackCustomerId = null, fallbackSaleId = null) {
+  const order = await mpRequest(`/v1/orders/${encodeURIComponent(providerOrderId)}`, { method: 'GET' });
+  let sale = db.prepare('SELECT * FROM sales WHERE mp_order_id=?').get(providerOrderId);
+  if (!sale) sale = createOrRecoverSaleFromOrder(order, fallbackCustomerId, fallbackSaleId);
+  if (!sale) return { order, matched: false };
+  const localStatus = statusForOrder(order, sale.amount); const now = new Date().toISOString(); const paymentId = firstPaymentId(order);
+  db.prepare(`UPDATE sales SET status=?,mp_payment_id=COALESCE(?,mp_payment_id),paid_at=CASE WHEN ?='paid' THEN COALESCE(paid_at,?) ELSE paid_at END WHERE id=?`).run(localStatus, paymentId, localStatus, now, sale.id);
+  db.prepare(`UPDATE payment_orders SET status=?,provider_payment_id=COALESCE(?,provider_payment_id),updated_at=? WHERE sale_id=?`).run(localStatus, paymentId, now, sale.id);
+  return { order, matched: true, status: localStatus, saleId: sale.id };
+}
+
+async function recoverRecentOrders(customerId, month) {
+  if (!mpConfigured()) return 0;
+  const start = `${month}-01T00:00:00.000Z`;
+  const endDate = new Date(start); endDate.setUTCMonth(endDate.getUTCMonth() + 1);
+  const data = await mpRequest(`/v1/orders?begin_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(endDate.toISOString())}&type=online&limit=100`, { method: 'GET' });
+  const orders = Array.isArray(data?.data) ? data.data : []; let recovered = 0;
+  for (const order of orders) {
+    const ref = String(order?.external_reference || ''); if (!ref.startsWith('VTX-')) continue;
+    const parsed = parseExternalReference(ref); if (!parsed || parsed.customerId !== customerId) continue;
+    const existing = db.prepare('SELECT id FROM sales WHERE mp_order_id=? OR id=?').get(String(order.id || ''), parsed.saleId);
+    if (!existing) recovered++;
+    createOrRecoverSaleFromOrder(order, parsed.customerId, parsed.saleId);
+  }
+  return recovered;
+}
+
+app.get('/health', (req, res) => res.json({ ok: true, service: 'vertice', version: '1.2.0' }));
+app.post('/auth/register', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase(); const password = String(req.body.password || '');
+  if (!email || password.length < 8) return res.status(400).json({ error: 'Informe e-mail e senha com pelo menos 8 caracteres.' });
+  try { const id = uuid(); const hash = await bcrypt.hash(password, 12); const now = new Date().toISOString();
+    db.prepare('INSERT INTO customers VALUES(?,?,?,?)').run(id, email, hash, now); db.prepare('INSERT INTO subscriptions VALUES(?,?,?,?,?,?)').run(uuid(), id, 'basic', 'pending', null, now);
+    return res.status(201).json({ token: tokenFor({ id, email }), role: 'CUSTOMER', customer: { id, email } });
+  } catch { return res.status(409).json({ error: 'Conta já existente ou dados inválidos.' }); }
+});
+app.post('/auth/login', async (req, res) => {
+  const login = String(req.body.login || req.body.email || '').trim().toLowerCase(); const password = String(req.body.password || '');
+  if (login === OWNER_LOGIN.toLowerCase() && password === OWNER_PASSWORD) return res.json({ token: tokenFor({ id: 'owner', email: OWNER_LOGIN }, 'OWNER'), role: 'OWNER', customer: { id: 'owner', email: OWNER_LOGIN } });
+  const c = db.prepare('SELECT * FROM customers WHERE email=?').get(login);
+  if (!c || !(await bcrypt.compare(password, c.password_hash))) return res.status(401).json({ error: 'Login ou senha inválidos.' });
+  return res.json({ token: tokenFor(c, 'CUSTOMER'), role: 'CUSTOMER', customer: { id: c.id, email: c.email } });
+});
+app.get('/me', auth, (req, res) => { if (req.user.role === 'OWNER') return res.json({ role: 'OWNER', customer: { id: 'owner', email: req.user.email }, subscription: { plan: 'owner', status: 'active', currentPeriodEnd: null } }); const s = subscription(req.user.sub); res.json({ role: 'CUSTOMER', customer: { id: req.user.sub, email: req.user.email }, subscription: s ? { plan: s.plan, status: effectiveStatus(s), currentPeriodEnd: s.current_period_end } : null }); });
+app.post('/devices/register', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Dispositivo comercial necessário.' }); const deviceId = String(req.body.deviceId || ''); const mode = String(req.body.mode || ''); if (!deviceId || !['comando','operacao','monitoramento'].includes(mode)) return res.status(400).json({ error: 'deviceId e mode são obrigatórios.' }); const now = new Date().toISOString(); const old = db.prepare('SELECT id,customer_id FROM devices WHERE id=?').get(deviceId); if (old && old.customer_id !== req.user.sub) return res.status(403).json({ error: 'Dispositivo pertence a outra conta.' }); if (old) db.prepare('UPDATE devices SET mode=?,device_name=?,last_seen_at=? WHERE id=?').run(mode, String(req.body.deviceName || ''), now, deviceId); else db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(deviceId, req.user.sub, String(req.body.deviceName || ''), mode, now, now); res.json({ ok: true, deviceId }); });
+app.post('/commands', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Use o painel do proprietário para administração.' }); const s = subscription(req.user.sub); if (effectiveStatus(s) !== 'active') return res.status(402).json({ error: 'Assinatura não está ativa.' }); const command = String(req.body.command || '').trim(); const mode = String(req.body.mode || '').trim(); const deviceId = String(req.body.deviceId || '').trim(); const scope = String(req.body.scope || 'somente_o_solicitado'); const preserveUnrequested = req.body.preservar_demais_configuracoes !== false; const imageBase64 = typeof req.body.imageBase64 === 'string' ? req.body.imageBase64 : null; if (!command || command.length > 2000) return res.status(400).json({ error: 'Comando inválido.' }); if (deviceId) { const d = db.prepare('SELECT customer_id FROM devices WHERE id=?').get(deviceId); if (!d || d.customer_id !== req.user.sub) return res.status(403).json({ error: 'Dispositivo não pertence à conta.' }); } const id = uuid(), now = new Date().toISOString(); db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id, req.user.sub, deviceId, mode, command, 'queued', now); res.status(202).json({ id, status: 'queued', message: imageBase64 ? 'Comando e imagem recebidos pelo Vértice.' : 'Comando recebido pelo Vértice.', executionPolicy: { scope, preserveUnrequested, hasImage: Boolean(imageBase64) } }); });
+app.get('/commands', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.json({ commands: [] }); const rows = db.prepare('SELECT id,device_id AS deviceId,mode,command,status,created_at AS createdAt FROM commands WHERE customer_id=? ORDER BY created_at DESC LIMIT 50').all(req.user.sub); res.json({ commands: rows }); });
+
+app.post('/sales/orders', auth, async (req, res) => {
+  if (req.user.role !== 'CUSTOMER' && req.user.role !== 'OWNER') return res.status(403).json({ error: 'Painel comercial necessário.' });
+  const product = String(req.body.product || '').trim(); const amount = money(req.body.amount);
+  if (!product || !Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error: 'Informe produto e valor válido.' });
+  if (amount > 1000000) return res.status(400).json({ error: 'Valor máximo permitido é R$ 1.000.000,00.' });
+  if (!mpConfigured()) return res.status(503).json({ error: 'Mercado Pago ainda não foi configurado no servidor.' });
+  const customerId = req.user.role === 'OWNER' ? 'owner' : req.user.sub; const saleId = uuid(); const externalReference = makeExternalReference(customerId, saleId); const idempotencyKey = uuid(); const now = new Date().toISOString();
+  try {
+    const order = await mpRequest('/v1/orders', { method: 'POST', headers: { 'X-Idempotency-Key': idempotencyKey }, body: JSON.stringify({ type: 'online', total_amount: amount.toFixed(2), external_reference: externalReference, processing_mode: 'manual', items: [{ title: product.slice(0, 120), quantity: 1, unit_price: amount.toFixed(2) }] }) });
+    const checkoutUrl = String(order.checkout_url || ''); const orderId = String(order.id || ''); if (!checkoutUrl || !orderId) throw new Error('Mercado Pago não retornou os dados necessários da order.');
+    db.prepare('INSERT INTO sales(id,customer_id,amount,product,channel,status,mp_order_id,checkout_url,created_at,external_reference) VALUES(?,?,?,?,?,?,?,?,?,?)').run(saleId, customerId, amount, product, 'mercado_pago', 'pending', orderId, checkoutUrl, now, externalReference);
+    db.prepare('INSERT INTO payment_orders(id,sale_id,customer_id,provider,provider_order_id,status,amount,checkout_url,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(uuid(), saleId, customerId, 'mercado_pago', orderId, 'pending', amount, checkoutUrl, now, now);
+    res.status(201).json({ saleId, orderId, status: 'pending', checkoutUrl });
+  } catch (e) {
+    console.error('MP create order error', JSON.stringify(e.provider || { message: e.message, status: e.status }, null, 2));
+    res.status(e.status && e.status < 500 ? e.status : 502).json({ error: e.message || 'Não foi possível criar a cobrança.', details: e.provider?.details || undefined });
+  }
+});
+
+app.get('/sales', auth, async (req, res) => {
+  if (req.user.role !== 'CUSTOMER' && req.user.role !== 'OWNER') return res.status(403).json({ error: 'Painel comercial necessário.' });
+  const month = String(req.query.month || new Date().toISOString().slice(0, 7)); const customerId = req.user.role === 'OWNER' ? 'owner' : req.user.sub;
+  try {
+    const rows0 = db.prepare('SELECT id,amount,product,channel,status,mp_order_id AS mpOrderId,checkout_url AS checkoutUrl,paid_at AS paidAt,created_at AS createdAt FROM sales WHERE customer_id=? AND substr(created_at,1,7)=? ORDER BY created_at DESC LIMIT 100').all(customerId, month);
+    for (const row of rows0) if (row.status === 'pending' && row.mpOrderId) { try { await reconcileMpOrder(row.mpOrderId, customerId, row.id); } catch (e) { console.error('MP auto-sync error', e.message); } }
+    try { await recoverRecentOrders(customerId, month); } catch (e) { console.error('MP recovery search error', e.message); }
+    const rows = db.prepare('SELECT id,amount,product,channel,status,mp_order_id AS mpOrderId,checkout_url AS checkoutUrl,paid_at AS paidAt,created_at AS createdAt FROM sales WHERE customer_id=? AND substr(created_at,1,7)=? ORDER BY created_at DESC LIMIT 100').all(customerId, month);
+    const totals = db.prepare('SELECT COALESCE(SUM(CASE WHEN status=\'paid\' THEN amount ELSE 0 END),0) gross,COUNT(CASE WHEN status=\'paid\' THEN 1 END) paidCount,COUNT(*) totalCount FROM sales WHERE customer_id=? AND substr(created_at,1,7)=?').get(customerId, month);
+    res.json({ month, sales: rows, summary: { grossRevenue: Number(totals.gross || 0), paidCount: Number(totals.paidCount || 0), totalCount: Number(totals.totalCount || 0) } });
+  } catch (e) { console.error('Sales read error', e); res.status(500).json({ error: 'Não foi possível carregar as vendas.' }); }
+});
+app.post('/sales/orders/:saleId/sync', auth, async (req, res) => {
+  if (req.user.role !== 'CUSTOMER' && req.user.role !== 'OWNER') return res.status(403).json({ error: 'Painel comercial necessário.' });
+  const customerId = req.user.role === 'OWNER' ? 'owner' : req.user.sub; const sale = db.prepare('SELECT * FROM sales WHERE id=? AND customer_id=?').get(req.params.saleId, customerId);
+  if (!sale) return res.status(404).json({ error: 'Venda não encontrada.' }); if (!sale.mp_order_id) return res.status(400).json({ error: 'Venda sem pedido Mercado Pago.' });
+  try { const result = await reconcileMpOrder(sale.mp_order_id, customerId, sale.id); res.json({ saleId: sale.id, status: result.status || sale.status, orderId: sale.mp_order_id }); }
+  catch (e) { console.error('MP sync error', JSON.stringify(e.provider || { message: e.message, status: e.status }, null, 2)); res.status(502).json({ error: e.message || 'Não foi possível sincronizar a venda.' }); }
+});
+app.post('/webhooks/mercadopago', async (req, res) => {
+  if (!validMpWebhook(req)) return res.status(401).json({ error: 'Webhook Mercado Pago não autorizado.' });
+  res.sendStatus(200); const type = String(req.query.type || req.body?.type || ''); const orderId = String(req.query['data.id'] || req.body?.data?.id || '');
+  if (type && type !== 'order') return; if (!orderId) return;
+  try { await reconcileMpOrder(orderId); } catch (e) { console.error('MP webhook processing error', e.message); }
+});
+
+app.get('/reports/monthly', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Painel comercial necessário.' }); const month = String(req.query.month || new Date().toISOString().slice(0, 7)); const sales = db.prepare('SELECT * FROM monthly_sales WHERE customer_id=? AND period_month=?').get(req.user.sub, month) || { period_month: month, gross_revenue: 0, net_revenue: 0, sales_count: 0, active_subscriptions: 0, cancellations: 0, delinquent: 0 }; const agg = db.prepare('SELECT COALESCE(SUM(CASE WHEN status=\'paid\' THEN amount ELSE 0 END),0) gross, COUNT(CASE WHEN status=\'paid\' THEN 1 END) count FROM sales WHERE customer_id=? AND substr(created_at,1,7)=?').get(req.user.sub, month); const gross = agg.gross || sales.gross_revenue || 0; const count = agg.count || sales.sales_count || 0; res.json({ report: { month: sales.period_month, grossRevenue: gross, netRevenue: sales.net_revenue || gross, salesCount: count, activeSubscriptions: sales.active_subscriptions, cancellations: sales.cancellations, delinquent: sales.delinquent, ticketAverage: count ? gross / count : 0 } }); });
+app.get('/ranking', auth, (req, res) => { if (req.user.role !== 'CUSTOMER') return res.status(403).json({ error: 'Painel comercial necessário.' }); const month = String(req.query.month || new Date().toISOString().slice(0, 7)); const rows = db.prepare(`SELECT c.id,c.email,COALESCE(SUM(CASE WHEN s.status='paid' THEN s.amount ELSE 0 END),0) gross,COUNT(CASE WHEN s.status='paid' THEN 1 END) sales FROM customers c LEFT JOIN sales s ON s.customer_id=c.id AND substr(s.created_at,1,7)=? GROUP BY c.id ORDER BY gross DESC`).all(month); const currentIndex = rows.findIndex(r => r.id === req.user.sub); const current = rows[currentIndex] || { gross: 0, sales: 0 }; res.json({ participation: 'private_default', ranking: { position: currentIndex >= 0 ? currentIndex + 1 : null, total: rows.length, score: Math.round(Number(current.gross) * 0.1 + Number(current.sales) * 2) }, benchmark: { topScore: rows.length ? Math.round(Number(rows[0].gross) * 0.1 + Number(rows[0].sales) * 2) : 0 }, leaderboard: rows.slice(0, 10).map((r, i) => ({ position: i + 1, score: Math.round(Number(r.gross) * 0.1 + Number(r.sales) * 2) })) }); });
+app.get('/admin/overview', auth, ownerOnly, (req, res) => { const customers = db.prepare('SELECT COUNT(*) n FROM customers').get().n; const active = db.prepare("SELECT COUNT(*) n FROM subscriptions WHERE status='active'").get().n; const devices = db.prepare('SELECT COUNT(*) n FROM devices').get().n; const commandsToday = db.prepare("SELECT COUNT(*) n FROM commands WHERE created_at>=date('now')").get().n; const salesMonth = db.prepare("SELECT COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) n FROM sales WHERE substr(created_at,1,7)=substr(date('now'),1,7)").get().n; res.json({ customers, activeSubscriptions: active, devices, commandsToday, salesMonth }); });
+app.get('/admin/customers', auth, ownerOnly, (req, res) => { const rows = db.prepare(`SELECT c.id,c.email,c.created_at createdAt,COALESCE(s.status,'blocked') subscriptionStatus,COALESCE(s.plan,'-') plan,(SELECT COUNT(*) FROM devices d WHERE d.customer_id=c.id) devices,(SELECT COUNT(*) FROM commands x WHERE x.customer_id=c.id) commands FROM customers c LEFT JOIN subscriptions s ON s.customer_id=c.id`).all(); res.json({ customers: rows }); });
+app.post('/subscription/webhook', express.json(), (req, res) => { const key = req.headers['x-vertice-webhook-secret']; if (!process.env.WEBHOOK_SECRET || key !== process.env.WEBHOOK_SECRET) return res.status(401).json({ error: 'Webhook não autorizado' }); const { customerId, status, plan, currentPeriodEnd } = req.body || {}; if (!customerId || !['active','pending','blocked','cancelled'].includes(status)) return res.status(400).json({ error: 'Payload inválido' }); const now = new Date().toISOString(); const s = subscription(customerId); if (s) db.prepare('UPDATE subscriptions SET plan=?,status=?,current_period_end=?,updated_at=? WHERE id=?').run(plan || s.plan, status, currentPeriodEnd || null, now, s.id); else db.prepare('INSERT INTO subscriptions VALUES(?,?,?,?,?,?)').run(uuid(), customerId, plan || 'basic', status, currentPeriodEnd || null, now); res.json({ ok: true }); });
+app.listen(process.env.PORT || 8080, () => console.log(`Vértice server na porta ${process.env.PORT || 8080}`));
