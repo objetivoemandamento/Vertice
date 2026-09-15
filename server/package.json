@@ -3,7 +3,7 @@
   "version": "1.1.0",
   "private": true,
   "scripts": {
-    "start": "node -e \"const fs=require('fs');const p='src/server.js';let s=fs.readFileSync(p,'utf8');const a=\"app.get('/sales',auth,(req,res)=>{\";const b=\"app.get('/sales',auth,async(req,res)=>{\";if(s.includes(a))s=s.replace(a,b);const marker=\"res.json({month,sales:rows,summary:{grossRevenue:totals.gross||0,paidCount:totals.paidCount||0,totalCount:totals.totalCount||0}});});\";const repl=\"for(const r of rows){if(r.status==='pending'&&r.mpOrderId){try{await reconcileMpOrder(r.mpOrderId);}catch(e){console.error('MP auto-sync error',e.message);}}}const fresh=db.prepare(\\\`SELECT id,amount,product,channel,status,mp_order_id AS mpOrderId,checkout_url AS checkoutUrl,paid_at AS paidAt,created_at AS createdAt FROM sales WHERE customer_id=? AND substr(created_at,1,7)=? ORDER BY created_at DESC LIMIT 100\\\`).all(customerId,month);const freshTotals=db.prepare(\\\`SELECT COALESCE(SUM(CASE WHEN status='paid' THEN amount ELSE 0 END),0) gross,COUNT(CASE WHEN status='paid' THEN 1 END) paidCount,COUNT(*) totalCount FROM sales WHERE customer_id=? AND substr(created_at,1,7)=?\\\`).get(customerId,month);res.json({month,sales:fresh,summary:{grossRevenue:freshTotals.gross||0,paidCount:freshTotals.paidCount||0,totalCount:freshTotals.totalCount||0}});});\";if(s.includes(marker))s=s.replace(marker,repl);fs.writeFileSync(p,s,'utf8');console.log('VÉRTICE auto-sync patch applied');\""
+    "start": "node src/server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
