@@ -35,7 +35,7 @@ class OperationAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     private suspend fun pollLoop() {
-        while (scope.isActive) {
+        while (true) {
             try {
                 val token = session.sessionToken
                 val mode = session.mode
