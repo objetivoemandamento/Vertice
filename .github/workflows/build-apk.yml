@@ -4,10 +4,14 @@ on:
     branches: [ main ]
   workflow_dispatch:
 jobs:
-  build:
+  validate-and-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Validate server JavaScript
+        run: node --check server/src/server.js
+      - name: Validate server package JSON
+        run: node -e "JSON.parse(require('fs').readFileSync('server/package.json','utf8')); console.log('server/package.json OK')"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -19,6 +23,6 @@ jobs:
         run: gradle --no-daemon :app:assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: VERTICE-v1.1-debug-apk
+          name: VERTICE-v1.3-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
