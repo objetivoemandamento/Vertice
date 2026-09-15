@@ -11,8 +11,8 @@ android {
         applicationId = "com.vertice.launcher"
         minSdk = 23
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.4.2"
+        versionCode = 17
+        versionName = "1.4.3"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
