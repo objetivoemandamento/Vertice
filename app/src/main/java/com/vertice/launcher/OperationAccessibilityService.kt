@@ -4,8 +4,10 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import com.vertice.launcher.network.QueuedCommand
+import com.vertice.launcher.network.VerticeApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -14,8 +16,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import com.vertice.launcher.network.CommandResult
-import com.vertice.launcher.network.VerticeApi
 
 /** Executor do terminal OPERAÇÃO. Só atua quando o modo local é operacao e o usuário habilitou Acessibilidade. */
 class OperationAccessibilityService : AccessibilityService() {
@@ -53,14 +53,20 @@ class OperationAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun executeCommand(token: String, command: CommandResult) {
+    private suspend fun executeCommand(token: String, command: QueuedCommand) {
         val result = withContext(Dispatchers.Main.immediate) { performCommand(command.command) }
-        api.updateCommandStatus(token, command.id, if (result.first) "completed" else "failed", result.second)
+        api.updateCommandStatus(
+            token,
+            command.id,
+            if (result.first) "completed" else "failed",
+            result.second
+        )
     }
 
     private fun performCommand(raw: String): Pair<Boolean, String> {
         val text = raw.trim()
         val lower = text.lowercase()
+        if (text.isBlank()) return false to "Comando vazio."
 
         if (lower == "voltar" || lower == "volte") {
             return if (performGlobalAction(GLOBAL_ACTION_BACK)) true to "Voltou uma tela." else false to "Não foi possível voltar."
@@ -117,7 +123,9 @@ class OperationAccessibilityService : AccessibilityService() {
             val value = typeMatch.groupValues[1].trim()
             val node = findFocusedEditable(rootInActiveWindow)
             if (node == null) return false to "Não encontrei campo de texto focado."
-            val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value) }
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+            }
             val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             return if (ok) true to "Texto preenchido." else false to "O aplicativo não aceitou o texto."
         }
@@ -131,9 +139,8 @@ class OperationAccessibilityService : AccessibilityService() {
         for (node in nodes) {
             var current: AccessibilityNodeInfo? = node
             repeat(5) {
-                if (current?.isClickable == true) {
-                    val clicked = current?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true
-                    if (clicked) return true
+                if (current?.isClickable == true && current?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+                    return true
                 }
                 current = current?.parent
             }
