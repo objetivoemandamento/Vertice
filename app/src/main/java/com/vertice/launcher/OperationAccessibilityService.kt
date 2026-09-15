@@ -13,7 +13,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -36,7 +35,7 @@ class OperationAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     private suspend fun pollLoop() {
-        while (isActive) {
+        while (scope.isActive) {
             try {
                 val token = session.sessionToken
                 val mode = session.mode
