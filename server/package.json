@@ -1,9 +1,9 @@
 {
   "name": "vertice-server",
-  "version": "1.3.0",
+  "version": "1.4.1",
   "private": true,
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node -r ./src/vertice-preload.js src/server.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
