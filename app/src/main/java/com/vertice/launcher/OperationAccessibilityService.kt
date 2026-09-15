@@ -4,7 +4,6 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.provider.Settings
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.vertice.launcher.network.QueuedCommand
@@ -42,9 +41,7 @@ class OperationAccessibilityService : AccessibilityService() {
             if (!token.isNullOrBlank() && mode == "operacao") {
                 try {
                     api.nextCommand(token, session.deviceId).onSuccess { command ->
-                        if (command != null) {
-                            scope.launch { executeCommand(token, command) }
-                        }
+                        if (command != null) scope.launch { executeCommand(token, command) }
                     }
                 } catch (_: Throwable) {
                     // Falhas de rede não derrubam o executor; a próxima rodada tenta novamente.
@@ -64,7 +61,7 @@ class OperationAccessibilityService : AccessibilityService() {
                 result.second
             )
         } catch (_: Throwable) {
-            // O comando já foi marcado running no servidor; a próxima auditoria pode identificar a pendência.
+            // O comando já foi marcado running no servidor.
         }
     }
 
@@ -73,7 +70,7 @@ class OperationAccessibilityService : AccessibilityService() {
         val lower = text.lowercase()
         if (text.isBlank()) return false to "Comando vazio."
 
-        if (lower == "voltar" || lower == "volte") {
+        if (lower == "voltar" || lower == "volte" || lower == "retornar" || lower == "retorne" || lower == "tela anterior") {
             return if (performGlobalAction(GLOBAL_ACTION_BACK)) true to "Voltou uma tela." else false to "Não foi possível voltar."
         }
         if (lower == "início" || lower == "inicio" || lower == "home" || lower == "tela inicial") {
@@ -83,7 +80,7 @@ class OperationAccessibilityService : AccessibilityService() {
         val url = Regex("(?i)https?://\\S+").find(text)?.value
         if (url != null) return openUrl(url)
 
-        val openSite = Regex("(?i)^(?:abra|abrir|acesse|acessar)\\s+(?:o\\s+)?site\\s+(.+)$").find(text)
+        val openSite = Regex("(?i)^(?:abra|abrir|abre|acesse|acessar)\\s+(?:o\\s+)?site\\s+(.+)$").find(text)
         if (openSite != null) {
             val target = openSite.groupValues[1].trim()
             val normalized = if (target.startsWith("http://") || target.startsWith("https://")) target else "https://$target"
@@ -91,7 +88,7 @@ class OperationAccessibilityService : AccessibilityService() {
         }
 
         // Aceita tanto "abra o aplicativo Chrome" quanto o comando natural "abra o Chrome".
-        val appMatch = Regex("(?i)^(?:abra|abrir|abre|acesse|acessar|inicie|iniciar)\\s+(?:o\\s+|a\\s+)?(?:aplicativo|app\\s+)?(.+)$").find(text)
+        val appMatch = Regex("(?i)^(?:abra|abrir|abre|acesse|acessar|inicie|iniciar)\\s+(?:o\\s+|a\\s+)?(?:aplicativo\\s+|app\\s+)?(.+)$").find(text)
         if (appMatch != null) {
             val requested = appMatch.groupValues[1].trim().lowercase()
                 .removePrefix("o ").removePrefix("a ").trim()
@@ -111,8 +108,7 @@ class OperationAccessibilityService : AccessibilityService() {
         val clickMatch = Regex("(?i)^(?:clique|clicar|toque|tocar)\\s+(?:em|no|na)\\s+(.+)$").find(text)
         if (clickMatch != null) {
             val label = clickMatch.groupValues[1].trim()
-            val clicked = clickByText(label)
-            return if (clicked) true to "Clique executado em: $label" else false to "Não encontrei um elemento clicável com o texto: $label"
+            return if (clickByText(label)) true to "Clique executado em: $label" else false to "Não encontrei um elemento clicável com o texto: $label"
         }
 
         val typeMatch = Regex("(?is)^(?:digite|escreva|preencha)\\s*[:=-]?\\s*(.+)$").find(text)
@@ -125,11 +121,6 @@ class OperationAccessibilityService : AccessibilityService() {
             }
             val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
             return if (ok) true to "Texto preenchido." else false to "O aplicativo não aceitou o texto."
-        }
-
-        // Comandos comuns de navegação para evitar falsas falhas por pequenas variações de linguagem.
-        if (lower.matches(Regex("(voltar|volte|retorne|retornar)(\\s+uma\\s+tela)?"))) {
-            return if (performGlobalAction(GLOBAL_ACTION_BACK)) true to "Voltou uma tela." else false to "Não foi possível voltar."
         }
 
         return false to "Comando recebido, mas ainda não há um executor compatível para: $text"
@@ -182,9 +173,7 @@ class OperationAccessibilityService : AccessibilityService() {
             "mercado livre" to "com.mercadolibre",
             "mercadolivre" to "com.mercadolibre",
             "play store" to "com.android.vending",
-            "gmail" to "com.google.android.gm",
-            "configurações" to Settings.ACTION_SETTINGS,
-            "configuracoes" to Settings.ACTION_SETTINGS
+            "gmail" to "com.google.android.gm"
         )
     }
 }
