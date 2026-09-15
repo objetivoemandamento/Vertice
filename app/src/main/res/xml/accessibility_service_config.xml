@@ -5,5 +5,4 @@
     android:notificationTimeout="100"
     android:canRetrieveWindowContent="true"
     android:canPerformGestures="true"
-    android:description="Permite ao VÉRTICE executar comandos autorizados no modo OPERAÇÃO."
     android:settingsActivity="com.vertice.launcher.MainActivity" />
