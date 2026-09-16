@@ -16,6 +16,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.math.min
 
 /** Executor do terminal OPERAÇÃO. Só atua quando o modo local é operacao e o usuário habilitou Acessibilidade. */
 class OperationAccessibilityService : AccessibilityService() {
@@ -23,11 +24,22 @@ class OperationAccessibilityService : AccessibilityService() {
     private val scope = CoroutineScope(Dispatchers.IO + serviceJob)
     private lateinit var api: VerticeApi
     private lateinit var session: VerticeSession
+    private var failureCount = 0
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        api = VerticeApi("https://vertice-backend-8gj5.onrender.com")
+        api = VerticeApi(BuildConfig.VERTICE_API_URL)
         session = VerticeSession(this)
+        
+        // Configurar callbacks de erro
+        api.onAuthError = {
+            session.clearLogin()
+            failureCount = 0  // Reset failure counter on auth error
+        }
+        api.onSubscriptionError = {
+            // Assinatura não ativa, mas continua tentando
+        }
+        
         scope.launch { pollLoop() }
     }
 
@@ -38,13 +50,29 @@ class OperationAccessibilityService : AccessibilityService() {
         while (scope.isActive) {
             val token = session.sessionToken
             val mode = session.mode
+            val deviceId = session.deviceId  // Persistido em SharedPreferences
+            
             if (!token.isNullOrBlank() && mode == "operacao") {
                 try {
-                    api.nextCommand(token, session.deviceId).onSuccess { command ->
-                        if (command != null) scope.launch { executeCommand(token, command) }
+                    // Polling com deviceId persistido - recebe somente comandos para este dispositivo
+                    api.nextCommand(token, deviceId).onSuccess { command ->
+                        if (command != null) {
+                            failureCount = 0  // Reset failure counter on success
+                            scope.launch { executeCommand(token, command) }
+                        }
+                    }.onFailure { e ->
+                        failureCount++
+                        // Log exception - não é silencioso
+                        System.err.println("[VerticeOperation] Poll failure: ${e.message}")
+                        // Exponential backoff: max 30 seconds between polls
+                        val backoffDelay = min(1800L * failureCount, 30000L)
+                        delay(backoffDelay - 1800L)  // Adjust for normal delay
                     }
-                } catch (_: Throwable) {
-                    // Falhas de rede não derrubam o executor; a próxima rodada tenta novamente.
+                } catch (e: Throwable) {
+                    failureCount++
+                    System.err.println("[VerticeOperation] Poll exception: ${e.message}")
+                    val backoffDelay = min(1800L * failureCount, 30000L)
+                    delay(backoffDelay - 1800L)
                 }
             }
             delay(1800)
@@ -54,14 +82,16 @@ class OperationAccessibilityService : AccessibilityService() {
     private suspend fun executeCommand(token: String, command: QueuedCommand) {
         val result = withContext(Dispatchers.Main.immediate) { performCommand(command.command) }
         try {
+            // Enviar status correto: completed ou failed
             api.updateCommandStatus(
                 token,
                 command.id,
                 if (result.first) "completed" else "failed",
                 result.second
             )
-        } catch (_: Throwable) {
-            // O comando já foi marcado running no servidor.
+        } catch (e: Throwable) {
+            // Log exception - não é silencioso
+            System.err.println("[VerticeOperation] Status update failed: ${e.message}")
         }
     }
 
