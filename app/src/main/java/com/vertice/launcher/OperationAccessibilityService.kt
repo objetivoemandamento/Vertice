@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.vertice.launcher.network.QueuedCommand
@@ -18,192 +19,71 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.min
 
-/** Executor do terminal OPERAÇÃO. Só atua quando o modo local é operacao e o usuário habilitou Acessibilidade. */
 class OperationAccessibilityService : AccessibilityService() {
-    private val serviceJob = SupervisorJob()
-    private val scope = CoroutineScope(Dispatchers.IO + serviceJob)
-    private lateinit var api: VerticeApi
-    private lateinit var session: VerticeSession
-    private var failureCount = 0
+    private val serviceJob=SupervisorJob()
+    private val scope=CoroutineScope(Dispatchers.IO+serviceJob)
+    private lateinit var api:VerticeApi
+    private lateinit var session:VerticeSession
+    private var failureCount=0
+    private var commandInFlight=false
 
-    override fun onServiceConnected() {
+    override fun onServiceConnected(){
         super.onServiceConnected()
-        api = VerticeApi(BuildConfig.VERTICE_API_URL)
-        session = VerticeSession(this)
-        
-        // Configurar callbacks de erro
-        api.onAuthError = {
-            session.clearLogin()
-            failureCount = 0  // Reset failure counter on auth error
-        }
-        api.onSubscriptionError = {
-            // Assinatura não ativa, mas continua tentando
-        }
-        
-        scope.launch { pollLoop() }
+        api=VerticeApi(BuildConfig.VERTICE_API_URL)
+        session=VerticeSession(this)
+        api.onAuthError={session.clearLogin();failureCount=0}
+        scope.launch{pollLoop()}
     }
+    override fun onAccessibilityEvent(event:AccessibilityEvent?)=Unit
+    override fun onInterrupt()=Unit
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
-    override fun onInterrupt() = Unit
-
-    private suspend fun pollLoop() {
-        while (scope.isActive) {
-            val token = session.sessionToken
-            val mode = session.mode
-            val deviceId = session.deviceId  // Persistido em SharedPreferences
-            
-            if (!token.isNullOrBlank() && mode == "operacao") {
-                try {
-                    // Polling com deviceId persistido - recebe somente comandos para este dispositivo
-                    api.nextCommand(token, deviceId).onSuccess { command ->
-                        if (command != null) {
-                            failureCount = 0  // Reset failure counter on success
-                            scope.launch { executeCommand(token, command) }
-                        }
-                    }.onFailure { e ->
-                        failureCount++
-                        // Log exception - não é silencioso
-                        System.err.println("[VerticeOperation] Poll failure: ${e.message}")
-                        // Exponential backoff: max 30 seconds between polls
-                        val backoffDelay = min(1800L * failureCount, 30000L)
-                        delay(backoffDelay - 1800L)  // Adjust for normal delay
+    private suspend fun pollLoop(){
+        while(scope.isActive){
+            val token=session.sessionToken
+            val mode=session.mode
+            val deviceId=session.deviceId
+            if(!token.isNullOrBlank()&&mode=="operacao"&&!commandInFlight){
+                api.nextCommand(token,deviceId).onSuccess{command->
+                    failureCount=0
+                    if(command!=null&&!commandInFlight){
+                        commandInFlight=true
+                        scope.launch{try{executeCommand(token,deviceId,command)}finally{commandInFlight=false}}
                     }
-                } catch (e: Throwable) {
+                }.onFailure{e->
                     failureCount++
-                    System.err.println("[VerticeOperation] Poll exception: ${e.message}")
-                    val backoffDelay = min(1800L * failureCount, 30000L)
-                    delay(backoffDelay - 1800L)
+                    Log.w(TAG,"Falha no polling: ${e.message}")
+                    val extra=min(1800L*failureCount,30000L)-1800L
+                    if(extra>0)delay(extra)
                 }
             }
             delay(1800)
         }
     }
 
-    private suspend fun executeCommand(token: String, command: QueuedCommand) {
-        val result = withContext(Dispatchers.Main.immediate) { performCommand(command.command) }
-        try {
-            // Enviar status correto: completed ou failed
-            api.updateCommandStatus(
-                token,
-                command.id,
-                if (result.first) "completed" else "failed",
-                result.second
-            )
-        } catch (e: Throwable) {
-            // Log exception - não é silencioso
-            System.err.println("[VerticeOperation] Status update failed: ${e.message}")
-        }
+    private suspend fun executeCommand(token:String,deviceId:String,command:QueuedCommand){
+        val result=withContext(Dispatchers.Main.immediate){performCommand(command.command)}
+        api.updateCommandStatus(token,command.id,if(result.first)"completed" else "failed",result.second,deviceId)
+            .onFailure{e->Log.e(TAG,"Falha ao atualizar status ${command.id}: ${e.message}")}
     }
 
-    private fun performCommand(raw: String): Pair<Boolean, String> {
-        val text = raw.trim()
-        val lower = text.lowercase()
-        if (text.isBlank()) return false to "Comando vazio."
-
-        if (lower == "voltar" || lower == "volte" || lower == "retornar" || lower == "retorne" || lower == "tela anterior") {
-            return if (performGlobalAction(GLOBAL_ACTION_BACK)) true to "Voltou uma tela." else false to "Não foi possível voltar."
-        }
-        if (lower == "início" || lower == "inicio" || lower == "home" || lower == "tela inicial") {
-            return if (performGlobalAction(GLOBAL_ACTION_HOME)) true to "Voltou para a tela inicial." else false to "Não foi possível ir para a tela inicial."
-        }
-
-        val url = Regex("(?i)https?://\\S+").find(text)?.value
-        if (url != null) return openUrl(url)
-
-        val openSite = Regex("(?i)^(?:abra|abrir|abre|acesse|acessar)\\s+(?:o\\s+)?site\\s+(.+)$").find(text)
-        if (openSite != null) {
-            val target = openSite.groupValues[1].trim()
-            val normalized = if (target.startsWith("http://") || target.startsWith("https://")) target else "https://$target"
-            return openUrl(normalized)
-        }
-
-        // Aceita tanto "abra o aplicativo Chrome" quanto o comando natural "abra o Chrome".
-        val appMatch = Regex("(?i)^(?:abra|abrir|abre|acesse|acessar|inicie|iniciar)\\s+(?:o\\s+|a\\s+)?(?:aplicativo\\s+|app\\s+)?(.+)$").find(text)
-        if (appMatch != null) {
-            val requested = appMatch.groupValues[1].trim().lowercase()
-                .removePrefix("o ").removePrefix("a ").trim()
-            val pkg = appPackages[requested]
-            if (pkg != null) {
-                val launch = packageManager.getLaunchIntentForPackage(pkg)
-                    ?: return false to "Aplicativo não instalado: $requested"
-                return try {
-                    startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                    true to "Aplicativo aberto: $requested"
-                } catch (e: Exception) {
-                    false to "Não foi possível abrir $requested: ${e.message ?: "erro"}"
-                }
-            }
-        }
-
-        val clickMatch = Regex("(?i)^(?:clique|clicar|toque|tocar)\\s+(?:em|no|na)\\s+(.+)$").find(text)
-        if (clickMatch != null) {
-            val label = clickMatch.groupValues[1].trim()
-            return if (clickByText(label)) true to "Clique executado em: $label" else false to "Não encontrei um elemento clicável com o texto: $label"
-        }
-
-        val typeMatch = Regex("(?is)^(?:digite|escreva|preencha)\\s*[:=-]?\\s*(.+)$").find(text)
-        if (typeMatch != null) {
-            val value = typeMatch.groupValues[1].trim()
-            val node = findFocusedEditable(rootInActiveWindow)
-            if (node == null) return false to "Não encontrei campo de texto focado."
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
-            }
-            val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-            return if (ok) true to "Texto preenchido." else false to "O aplicativo não aceitou o texto."
-        }
-
+    private fun performCommand(raw:String):Pair<Boolean,String>{
+        val text=raw.trim();val lower=text.lowercase();if(text.isBlank())return false to "Comando vazio."
+        if(lower in setOf("voltar","volte","retornar","retorne","tela anterior"))return if(performGlobalAction(GLOBAL_ACTION_BACK))true to "Voltou uma tela." else false to "Não foi possível voltar."
+        if(lower in setOf("início","inicio","home","tela inicial"))return if(performGlobalAction(GLOBAL_ACTION_HOME))true to "Voltou para a tela inicial." else false to "Não foi possível ir para a tela inicial."
+        Regex("(?i)https?://\\S+").find(text)?.value?.let{return openUrl(it)}
+        val site=Regex("(?i)^(?:abra|abrir|abre|acesse|acessar)\\s+(?:o\\s+)?site\\s+(.+)$").find(text)
+        if(site!=null){val target=site.groupValues[1].trim();return openUrl(if(target.startsWith("http://")||target.startsWith("https://"))target else "https://$target")}
+        val app=Regex("(?i)^(?:abra|abrir|abre|acesse|acessar|inicie|iniciar)\\s+(?:o\\s+|a\\s+)?(?:aplicativo\\s+|app\\s+)?(.+)$").find(text)
+        if(app!=null){val requested=app.groupValues[1].trim().lowercase().removePrefix("o ").removePrefix("a ").trim();val pkg=appPackages[requested];if(pkg!=null){val launch=packageManager.getLaunchIntentForPackage(pkg)?:return false to "Aplicativo não instalado: $requested";return try{startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));true to "Aplicativo aberto: $requested"}catch(e:Exception){false to "Não foi possível abrir $requested: ${e.message?:"erro"}"}}}
+        val click=Regex("(?i)^(?:clique|clicar|toque|tocar)\\s+(?:em|no|na)\\s+(.+)$").find(text)
+        if(click!=null){val label=click.groupValues[1].trim();return if(clickByText(label))true to "Clique executado em: $label" else false to "Não encontrei um elemento clicável com o texto: $label"}
+        val type=Regex("(?is)^(?:digite|escreva|preencha)\\s*[:=-]?\\s*(.+)$").find(text)
+        if(type!=null){val node=findFocusedEditable(rootInActiveWindow)?:return false to "Não encontrei campo de texto focado.";val args=Bundle().apply{putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,type.groupValues[1].trim())};return if(node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args))true to "Texto preenchido." else false to "O aplicativo não aceitou o texto."}
         return false to "Comando recebido, mas ainda não há um executor compatível para: $text"
     }
-
-    private fun openUrl(url: String): Pair<Boolean, String> = try {
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        true to "Site aberto: $url"
-    } catch (e: Exception) {
-        false to "Não foi possível abrir o site: ${e.message ?: "erro"}"
-    }
-
-    private fun clickByText(label: String): Boolean {
-        val root = rootInActiveWindow ?: return false
-        val nodes = root.findAccessibilityNodeInfosByText(label)
-        for (node in nodes) {
-            var current: AccessibilityNodeInfo? = node
-            repeat(7) {
-                if (current?.isClickable == true && current?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) return true
-                current = current?.parent
-            }
-        }
-        return false
-    }
-
-    private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (root == null) return null
-        if (root.isEditable && root.isFocused) return root
-        for (i in 0 until root.childCount) {
-            val found = findFocusedEditable(root.getChild(i))
-            if (found != null) return found
-        }
-        return null
-    }
-
-    override fun onDestroy() {
-        scope.cancel()
-        serviceJob.cancel()
-        super.onDestroy()
-    }
-
-    companion object {
-        private val appPackages = mapOf(
-            "whatsapp" to "com.whatsapp",
-            "instagram" to "com.instagram.android",
-            "facebook" to "com.facebook.katana",
-            "youtube" to "com.google.android.youtube",
-            "chrome" to "com.android.chrome",
-            "navegador" to "com.android.chrome",
-            "mercado livre" to "com.mercadolibre",
-            "mercadolivre" to "com.mercadolibre",
-            "play store" to "com.android.vending",
-            "gmail" to "com.google.android.gm"
-        )
-    }
+    private fun openUrl(url:String):Pair<Boolean,String>=try{startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));true to "Site aberto: $url"}catch(e:Exception){false to "Não foi possível abrir o site: ${e.message?:"erro"}"}
+    private fun clickByText(label:String):Boolean{val root=rootInActiveWindow?:return false;for(node in root.findAccessibilityNodeInfosByText(label)){var current:AccessibilityNodeInfo?=node;repeat(7){if(current?.isClickable==true&&current.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;current=current?.parent}};return false}
+    private fun findFocusedEditable(root:AccessibilityNodeInfo?):AccessibilityNodeInfo?{if(root==null)return null;if(root.isEditable&&root.isFocused)return root;for(i in 0 until root.childCount){findFocusedEditable(root.getChild(i))?.let{return it}};return null}
+    override fun onDestroy(){scope.cancel();serviceJob.cancel();super.onDestroy()}
+    companion object{private const val TAG="VerticeOperation";private val appPackages=mapOf("whatsapp" to "com.whatsapp","instagram" to "com.instagram.android","facebook" to "com.facebook.katana","youtube" to "com.google.android.youtube","chrome" to "com.android.chrome","navegador" to "com.android.chrome","mercado livre" to "com.mercadolibre","mercadolivre" to "com.mercadolibre","play store" to "com.android.vending","gmail" to "com.google.android.gm")}
 }
