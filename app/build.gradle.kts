@@ -11,7 +11,7 @@ android {
         applicationId = "com.vertice.launcher"
         minSdk = 23
         targetSdk = 35
-        versionCode = 18
+        versionCode = (System.getenv("VERTICE_BUILD_NUMBER") ?: "18").toInt()
         versionName = "1.4.4"
         buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
     }
