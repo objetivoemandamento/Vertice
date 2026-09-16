@@ -45,11 +45,11 @@ class OperationAccessibilityService : AccessibilityService() {
                 val token = session.sessionToken
                 val mode = session.mode
                 val deviceId = session.deviceId
-                if (!token.isNullOrBlank() && mode.equals("operacao", ignoreCase = true) && !commandInFlight) {
+                if (!EmergencyState.isStopped(this@OperationAccessibilityService) && !token.isNullOrBlank() && mode.equals("operacao", ignoreCase = true) && !commandInFlight) {
                     api.nextCommand(token, deviceId)
                         .onSuccess { command ->
                             failureCount = 0
-                            if (command != null && !commandInFlight) {
+                            if (command != null && !commandInFlight && !EmergencyState.isStopped(this@OperationAccessibilityService)) {
                                 commandInFlight = true
                                 scope.launch {
                                     try {
@@ -80,7 +80,14 @@ class OperationAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun executeCommand(token: String, deviceId: String, command: QueuedCommand) {
-        val result = withContext(Dispatchers.Main.immediate) { performCommand(command.command) }
+        if (EmergencyState.isStopped(this)) {
+            runCatching { api.updateCommandStatus(token, command.id, "cancelled", "Execução bloqueada pelo botão de emergência.", deviceId) }
+            return
+        }
+        val result = withContext(Dispatchers.Main.immediate) {
+            if (EmergencyState.isStopped(this@OperationAccessibilityService)) false to "Execução bloqueada pelo botão de emergência."
+            else performCommand(command.command)
+        }
         api.updateCommandStatus(
             token,
             command.id,
@@ -91,6 +98,7 @@ class OperationAccessibilityService : AccessibilityService() {
     }
 
     private fun performCommand(raw: String): Pair<Boolean, String> {
+        if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val text = raw.trim()
         val lower = text.lowercase()
         if (text.isBlank()) return false to "Comando vazio."
@@ -133,28 +141,11 @@ class OperationAccessibilityService : AccessibilityService() {
     }
 
     private fun launchApp(requestedRaw: String): Pair<Boolean, String> {
-        val requested = requestedRaw
-            .removeSuffix(".")
-            .replace("google chrome", "chrome")
-            .replace("whats app", "whatsapp")
-            .replace("mercado-livre", "mercado livre")
-            .trim()
-        val packageName = appPackages[requested]
-        if (packageName == null) {
-            return false to "Não reconheci o aplicativo: $requested"
-        }
-
-        val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
-        if (launchIntent == null) {
-            return false to "Aplicativo não instalado ou desativado: $requested"
-        }
-
+        val requested = requestedRaw.removeSuffix(".").replace("google chrome", "chrome").replace("whats app", "whatsapp").replace("mercado-livre", "mercado livre").trim()
+        val packageName = appPackages[requested] ?: return false to "Não reconheci o aplicativo: $requested"
+        val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: return false to "Aplicativo não instalado ou desativado: $requested"
         return try {
-            launchIntent.addFlags(
-                Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP
-            )
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or Intent.FLAG_ACTIVITY_CLEAR_TOP)
             startActivity(launchIntent)
             true to "Aplicativo aberto: $requested"
         } catch (e: Exception) {
@@ -186,9 +177,7 @@ class OperationAccessibilityService : AccessibilityService() {
     private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
         if (root == null) return null
         if (root.isEditable && root.isFocused) return root
-        for (i in 0 until root.childCount) {
-            findFocusedEditable(root.getChild(i))?.let { return it }
-        }
+        for (i in 0 until root.childCount) findFocusedEditable(root.getChild(i))?.let { return it }
         return null
     }
 
