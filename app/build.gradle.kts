@@ -13,6 +13,7 @@ android {
         targetSdk = 35
         versionCode = 18
         versionName = "1.4.4"
+        buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -22,6 +23,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+        }
+        debug {
+            buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
         }
     }
 }
