@@ -58,7 +58,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-private const val VERTICE_BASE_URL = "https://vertice-backend-8gj5.onrender.com"
 private val MODES = listOf("comando", "operacao", "monitoramento")
 
 data class ChatLine(val fromUser: Boolean, val text: String)
@@ -92,7 +91,7 @@ private fun openAccessibilitySettings(context: Context) {
 private fun VerticeApp() {
     val context = LocalContext.current
     val session = remember { VerticeSession(context) }
-    val api = remember { VerticeApi(VERTICE_BASE_URL) }
+    val api = remember { VerticeApi(BuildConfig.VERTICE_API_URL) }
     var token by remember { mutableStateOf(session.sessionToken) }
     var role by remember { mutableStateOf(session.role) }
     var mode by remember { mutableStateOf(session.mode) }
@@ -100,6 +99,19 @@ private fun VerticeApp() {
 
     val refreshPermissionState = {
         permissionsReady = mode != "operacao" || accessibilityEnabled(context)
+    }
+
+    // Configurar callbacks de erro de autenticação
+    LaunchedEffect(api) {
+        api.onAuthError = {
+            session.clearLogin()
+            token = null
+            role = null
+            mode = null
+        }
+        api.onSubscriptionError = {
+            // Poderia mostrar um diálogo, mas por enquanto apenas registra
+        }
     }
 
     DisposableEffect(Unit) {
@@ -228,7 +240,7 @@ private fun PermissionSetupScreen(context: Context, onRefresh: () -> Unit) {
         Spacer(Modifier.height(18.dp))
         Text(
             if (accessibility) "✅ Permissões principais prontas."
-            else "⚠️ Ative “VÉRTICE Operação” na tela de Acessibilidade e volte para o aplicativo.",
+            else "⚠️ Ative "VÉRTICE Operação" na tela de Acessibilidade e volte para o aplicativo.",
             fontWeight = FontWeight.SemiBold
         )
         Spacer(Modifier.height(12.dp))
