@@ -2,6 +2,7 @@ const express=require('express');
 const jwt=require('jsonwebtoken');
 const crypto=require('crypto');
 const Database=require('better-sqlite3');
+if(process.env.NODE_ENV==='production'&&(!process.env.JWT_SECRET||!process.env.OWNER_LOGIN||!process.env.OWNER_PASSWORD))throw new Error('JWT_SECRET, OWNER_LOGIN e OWNER_PASSWORD são obrigatórios em produção.');
 const db=new Database(process.env.DB_PATH||'vertice.db');
 const originalListen=express.application.listen;let installed=false;
 const err=(res,status,error)=>res.status(status).json({error});
@@ -36,5 +37,4 @@ app.get('/ranking',authSales,(req,res)=>{const m=month(req.query?.month);if(!m)r
 app.get('/admin/overview',(req,res)=>{const u=verify(req);if(!owner(u))return err(res,403,'Acesso de proprietário necessário.');const customers=db.prepare('SELECT COUNT(*) n FROM customers').get().n,activeSubs=db.prepare('SELECT COUNT(*) n FROM subscriptions WHERE status="active"').get().n,devices=db.prepare('SELECT COUNT(*) n FROM devices').get().n,commandsToday=db.prepare('SELECT COUNT(*) n FROM commands WHERE created_at>=date("now")').get().n,salesMonth=db.prepare('SELECT COALESCE(SUM(CASE WHEN status="paid" THEN amount ELSE 0 END),0) n FROM sales WHERE substr(created_at,1,7)=substr(date("now"),1,7)').get().n;res.json({customers,activeSubscriptions:activeSubs,devices,commandsToday,salesMonth:Number(salesMonth||0)});});
 app.get('/admin/customers',(req,res)=>{const u=verify(req);if(!owner(u))return err(res,403,'Acesso de proprietário necessário.');const rows=db.prepare('SELECT c.id,c.email,c.created_at createdAt,COALESCE(s.status,"blocked") subscriptionStatus,COALESCE(s.plan,"-") plan,(SELECT COUNT(*) FROM devices d WHERE d.customer_id=c.id) devices,(SELECT COUNT(*) FROM commands x WHERE x.customer_id=c.id) commands FROM customers c LEFT JOIN subscriptions s ON s.customer_id=c.id').all();res.json({customers:rows});});
 }
-function authSales(req,res,next){const u=verify(req);if(!u)return err(res,401,'Sessão inválida');if(u.role!=='CUSTOMER')return err(res,403,'Painel comercial necessário.');if(!active(u))return err(res,402,'Assinatura não está ativa.');req.user=u;next();}
 express.application.listen=function(...args){install(this);return originalListen.apply(this,args);};
