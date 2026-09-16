@@ -15,18 +15,14 @@ android {
         versionName = "1.4.4"
         buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
     }
+    buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-
     buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
-        debug {
-            buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
-        }
+        release { isMinifyEnabled = false }
+        debug { buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"") }
     }
 }
 
