@@ -20,9 +20,32 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    signingConfigs {
+        create("release") {
+            val keystorePath = System.getenv("VERTICE_KEYSTORE_PATH")
+            val storePassword = System.getenv("VERTICE_STORE_PASSWORD")
+            val keyPassword = System.getenv("VERTICE_KEY_PASSWORD")
+            val keyAlias = System.getenv("VERTICE_KEY_ALIAS")
+            if (!keystorePath.isNullOrBlank() && !storePassword.isNullOrBlank() && !keyPassword.isNullOrBlank() && !keyAlias.isNullOrBlank()) {
+                storeFile = file(keystorePath)
+                this.storePassword = storePassword
+                this.keyAlias = keyAlias
+                this.keyPassword = keyPassword
+            }
+        }
+    }
     buildTypes {
-        release { isMinifyEnabled = false }
-        debug { buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"") }
+        release {
+            isMinifyEnabled = false
+            val signingReady = !System.getenv("VERTICE_KEYSTORE_PATH").isNullOrBlank() &&
+                !System.getenv("VERTICE_STORE_PASSWORD").isNullOrBlank() &&
+                !System.getenv("VERTICE_KEY_PASSWORD").isNullOrBlank() &&
+                !System.getenv("VERTICE_KEY_ALIAS").isNullOrBlank()
+            if (signingReady) signingConfig = signingConfigs.getByName("release")
+        }
+        debug {
+            buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
+        }
     }
 }
 
