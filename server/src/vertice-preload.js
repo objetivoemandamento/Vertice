@@ -1,159 +1,25 @@
-const express = require('express');
-const jwt = require('jsonwebtoken');
-const crypto = require('crypto');
-const Database = require('better-sqlite3');
-
-const DB_PATH = process.env.DB_PATH || 'vertice.db';
-const db = new Database(DB_PATH);
-const originalListen = express.application.listen;
-let installed = false;
-
-function jsonError(res, status, error) { return res.status(status).json({ error }); }
-function getToken(req) {
-  const h = String(req.headers.authorization || '');
-  return h.startsWith('Bearer ') ? h.slice(7) : '';
+const express=require('express');
+const jwt=require('jsonwebtoken');
+const crypto=require('crypto');
+const Database=require('better-sqlite3');
+const db=new Database(process.env.DB_PATH||'vertice.db');
+const originalListen=express.application.listen;let installed=false;
+const err=(res,status,error)=>res.status(status).json({error});
+const token=req=>{const h=String(req.headers.authorization||'');return h.startsWith('Bearer ')?h.slice(7):'';};
+const verify=req=>{try{const s=process.env.JWT_SECRET;if(!s)return null;return jwt.verify(token(req),s);}catch{return null;}};
+const mode=v=>{const x=String(v||'comando').trim().toLowerCase();return ['comando','operacao','monitoramento'].includes(x)?x:null;};
+const owner=u=>u?.role==='OWNER';
+const customer=u=>owner(u)?'owner':u?.sub;
+function active(u){if(owner(u))return true;const s=db.prepare('SELECT status,current_period_end FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(u.sub);return Boolean(s&&s.status==='active'&&(!s.current_period_end||new Date(s.current_period_end)>=new Date()));}
+function aiFallback(message,m){const x=String(message||'').toLowerCase();if(x.includes('venda')||x.includes('receita'))return{answer:`VÉRTICE — ${m}: foco em receita paga, ticket, conversão e pendências.`,actions:[{type:'sales',label:'Analisar vendas'}]};if(x.includes('produto')||x.includes('oferta'))return{answer:`VÉRTICE — ${m}: estruturar problema, público, proposta, MVP e teste.`,actions:[{type:'plan',label:'Estruturar oportunidade'}]};return{answer:`VÉRTICE — ${m}: comando recebido. Escopo limitado ao solicitado; demais configurações preservadas.`,actions:[{type:'command',label:'Enviar para operação'}]};}
+async function aiReply(message,m){const key=process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'';const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':'')||(process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');if(!key||!base)return aiFallback(message,m);const model=process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini');const c=new AbortController(),t=setTimeout(()=>c.abort(),20000);try{const r=await fetch(`${base}/chat/completions`,{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify({model,temperature:.2,messages:[{role:'system',content:`Você é o VÉRTICE, operador autônomo de negócios. Responda em português. Modo: ${m}. Analise antes de agir, não invente dados e preserve tudo que não foi solicitado.`},{role:'user',content:String(message||'').slice(0,6000)}]}),signal:c.signal});const d=await r.json();if(!r.ok)throw Error(`AI HTTP ${r.status}`);const a=String(d?.choices?.[0]?.message?.content||'').trim();if(!a)throw Error('Resposta vazia');return{answer:a,actions:[{type:'ai',label:'Análise concluída'}]};}catch(e){console.error('[vertice] AI:',e.message);return aiFallback(message,m);}finally{clearTimeout(t);}}
+function install(app){if(installed)return;installed=true;
+app.post('/ai/chat',async(req,res)=>{const u=verify(req),m=mode(req.body?.mode);if(!u)return err(res,401,'Sessão inválida');if(!active(u))return err(res,402,'Assinatura não está ativa.');const message=String(req.body?.message||'').trim();if(!message||message.length>6000||!m)return err(res,400,'Mensagem ou modo inválido.');res.json({ok:true,...await aiReply(message,m),executionPolicy:{scope:'somente_o_solicitado',preservar_demais_configuracoes:true}});});
+app.post('/owner/devices/register',(req,res)=>{const u=verify(req);if(!owner(u))return err(res,403,'Acesso de proprietário necessário.');const id=String(req.body?.deviceId||'').trim(),m=mode(req.body?.mode),name=String(req.body?.deviceName||'').trim().slice(0,100);if(!id||!m||!name)return err(res,400,'deviceId, mode e deviceName são obrigatórios.');const old=db.prepare('SELECT customer_id FROM devices WHERE id=?').get(id);if(old&&old.customer_id!=='owner')return err(res,403,'Dispositivo pertence a outra conta.');const now=new Date().toISOString();if(old)db.prepare('UPDATE devices SET mode=?,device_name=?,last_seen_at=? WHERE id=?').run(m,name,now,id);else db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(id,'owner',name,m,now,now);res.json({ok:true,deviceId:id,mode:m});});
+app.post('/owner/commands',(req,res)=>{const u=verify(req);if(!owner(u))return err(res,403,'Acesso de proprietário necessário.');const command=String(req.body?.command||'').trim(),m=mode(req.body?.mode),deviceId=String(req.body?.deviceId||'').trim();if(!command||command.length>2000||!m||!deviceId)return err(res,400,'Comando, modo e deviceId são obrigatórios.');const d=db.prepare('SELECT customer_id,mode FROM devices WHERE id=?').get(deviceId);if(!d||d.customer_id!=='owner')return err(res,403,'Dispositivo não pertence ao proprietário.');if(m==='operacao'&&d.mode!=='operacao')return err(res,409,'O dispositivo não está em OPERAÇÃO.');const id=crypto.randomUUID(),now=new Date().toISOString();db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id,'owner',deviceId,m,command,'queued',now);res.status(202).json({id,status:'queued',message:'Comando recebido pelo VÉRTICE.'});});
+app.post('/commands',(req,res)=>{const u=verify(req);if(!u)return err(res,401,'Sessão inválida');if(!active(u))return err(res,402,'Assinatura não está ativa.');const command=String(req.body?.command||'').trim(),m=mode(req.body?.mode),deviceId=String(req.body?.deviceId||'').trim();if(!command||command.length>2000||!m||!deviceId)return err(res,400,'Comando, modo e deviceId são obrigatórios.');const d=db.prepare('SELECT customer_id,mode FROM devices WHERE id=?').get(deviceId);if(!d||d.customer_id!==customer(u))return err(res,403,'Dispositivo não pertence à conta.');if(m==='operacao'&&d.mode!=='operacao')return err(res,409,'O dispositivo não está em OPERAÇÃO.');const id=crypto.randomUUID(),now=new Date().toISOString();db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id,customer(u),deviceId,m,command,'queued',now);res.status(202).json({id,status:'queued',message:'Comando recebido pelo VÉRTICE.'});});
+app.get('/commands',(req,res)=>{const u=verify(req);if(!u)return err(res,401,'Sessão inválida');const rows=db.prepare('SELECT id,device_id AS deviceId,mode,command,status,created_at AS createdAt FROM commands WHERE customer_id=? ORDER BY created_at DESC LIMIT 50').all(customer(u));res.json({commands:rows});});
+app.get('/commands/next',(req,res)=>{const u=verify(req);if(!u)return err(res,401,'Sessão inválida');if(!active(u))return err(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();if(!deviceId)return err(res,400,'deviceId é obrigatório.');const d=db.prepare('SELECT id,customer_id,mode FROM devices WHERE id=?').get(deviceId);if(!d||d.customer_id!==customer(u)||d.mode!=='operacao')return err(res,403,'Terminal OPERAÇÃO não autorizado.');db.prepare('UPDATE devices SET last_seen_at=? WHERE id=?').run(new Date().toISOString(),deviceId);const row=db.prepare('SELECT id,command,mode,status FROM commands WHERE customer_id=? AND device_id=? AND mode="operacao" AND status="queued" ORDER BY created_at ASC LIMIT 1').get(customer(u),deviceId);if(!row)return res.json({ok:true,command:null});const changed=db.prepare('UPDATE commands SET status="running" WHERE id=? AND customer_id=? AND status="queued"').run(row.id,customer(u));if(!changed.changes)return res.json({ok:true,command:null});row.status='running';res.json({ok:true,command:row});});
+app.post('/commands/:commandId/status',(req,res)=>{const u=verify(req);if(!u)return err(res,401,'Sessão inválida');if(!active(u))return err(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId||'').trim(),status=String(req.body?.status||'').trim().toLowerCase(),message=String(req.body?.message||'').trim().slice(0,1000),deviceId=String(req.body?.deviceId||'').trim();if(!id||!['completed','failed'].includes(status)||!deviceId)return err(res,400,'Status ou deviceId inválido.');const c=db.prepare('SELECT id,customer_id,device_id,status FROM commands WHERE id=?').get(id);if(!c||c.customer_id!==customer(u)||c.device_id!==deviceId)return err(res,404,'Comando não encontrado para este dispositivo.');if(c.status==='completed'||c.status==='failed')return res.json({ok:true,status:c.status});db.prepare('UPDATE commands SET status=? WHERE id=? AND customer_id=? AND device_id=? AND status="running"').run(status,id,customer(u),deviceId);if(message)console.log(`[vertice] command ${id} ${status}: ${message}`);res.json({ok:true,status});});
 }
-function verify(req) {
-  try {
-    const secret = process.env.JWT_SECRET;
-    if (!secret) return null;
-    return jwt.verify(getToken(req), secret);
-  } catch { return null; }
-}
-function cleanMode(value) {
-  const mode = String(value || 'comando').trim().toLowerCase();
-  return ['comando','operacao','monitoramento'].includes(mode) ? mode : null;
-}
-function customerFor(user) { return user.role === 'OWNER' ? 'owner' : user.sub; }
-function activeCustomer(user) {
-  if (user.role === 'OWNER') return true;
-  const sub = db.prepare('SELECT status,current_period_end FROM subscriptions WHERE customer_id=? ORDER BY updated_at DESC LIMIT 1').get(user.sub);
-  return Boolean(sub && sub.status === 'active' && (!sub.current_period_end || new Date(sub.current_period_end) >= new Date()));
-}
-function fallback(message, mode) {
-  const text = String(message || '').trim();
-  const lower = text.toLowerCase();
-  if (lower.includes('produto') || lower.includes('crie') || lower.includes('oferta')) return {
-    answer: `VÉRTICE — ${mode}: vou estruturar a oportunidade em problema, público comprador, proposta de valor, MVP e teste. Escopo: somente o solicitado; demais configurações preservadas.\n\nPróxima ação: transformar o pedido em uma especificação vendável e mensurável.`,
-    actions: [{ type:'plan', label:'Estruturar oportunidade' }]
-  };
-  if (lower.includes('mercado') || lower.includes('concorr') || lower.includes('tend')) return {
-    answer: `VÉRTICE — ${mode}: uma análise de mercado precisa separar evidência de hipótese. Vou olhar demanda, reclamações, concorrência, preço, canais e lacunas antes de recomendar uma mudança.`,
-    actions: [{ type:'research', label:'Definir radar de mercado' }]
-  };
-  if (lower.includes('venda') || lower.includes('fatur') || lower.includes('receita')) return {
-    answer: `VÉRTICE — ${mode}: foco comercial em receita paga, ticket, volume, conversão e pendências. A regra é melhorar a estratégia sem alterar o que não foi solicitado.`,
-    actions: [{ type:'sales', label:'Analisar vendas' }]
-  };
-  return {
-    answer: `VÉRTICE — ${mode}: comando recebido. Vou manter o escopo em “somente_o_solicitado”, preservar as demais configurações e organizar a próxima ação verificável.`,
-    actions: [{ type:'command', label:'Enviar para operação' }]
-  };
-}
-function aiBaseUrl() {
-  return String(process.env.VERTICE_AI_BASE_URL || (process.env.GROQ_API_KEY ? 'https://api.groq.com/openai/v1' : '') || (process.env.OPENAI_API_KEY ? 'https://api.openai.com/v1' : '')).replace(/\/$/, '');
-}
-async function aiReply(message, mode) {
-  const key = process.env.VERTICE_AI_API_KEY || process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY || '';
-  const base = aiBaseUrl();
-  if (!key || !base) return fallback(message, mode);
-  const model = process.env.VERTICE_AI_MODEL || (process.env.GROQ_API_KEY ? 'llama-3.3-70b-versatile' : 'gpt-4o-mini');
-  const payload = {
-    model,
-    temperature: 0.2,
-    messages: [
-      { role:'system', content:`Você é o VÉRTICE, operador autônomo de negócios. Responda em português e com linguagem executiva. Modo: ${mode}. Analise antes de agir, não invente métricas, diferencie hipótese de evidência e preserve tudo que não foi solicitado. Quando a ação exigir sistema externo, descreva o plano e não finja que executou.` },
-      { role:'user', content:String(message || '').slice(0,6000) }
-    ]
-  };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
-  try {
-    const r = await fetch(`${base}/chat/completions`, { method:'POST', headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`}, body:JSON.stringify(payload), signal:controller.signal });
-    const data = await r.json();
-    if (!r.ok) throw new Error(`AI HTTP ${r.status}`);
-    const answer = String(data?.choices?.[0]?.message?.content || '').trim();
-    if (!answer) throw new Error('Resposta vazia');
-    return { answer, actions:[{ type:'ai', label:'Análise concluída' }] };
-  } catch (e) {
-    console.error('[vertice-preload] AI fallback:', e.message);
-    return fallback(message, mode);
-  } finally { clearTimeout(timer); }
-}
-function install(app) {
-  if (installed || !app || typeof app.post !== 'function') return;
-  installed = true;
-
-  app.post('/ai/chat', async (req,res) => {
-    const user = verify(req);
-    if (!user) return jsonError(res,401,'Sessão inválida');
-    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
-    const message = String(req.body?.message || '').trim();
-    const mode = cleanMode(req.body?.mode);
-    if (!message || message.length > 6000 || !mode) return jsonError(res,400,'Mensagem ou modo inválido.');
-    const result = await aiReply(message, mode);
-    return res.json({ ok:true, ...result, executionPolicy:{ scope:'somente_o_solicitado', preservar_demais_configuracoes:true } });
-  });
-
-  app.post('/owner/devices/register', (req,res) => {
-    const user = verify(req); if (!user || user.role !== 'OWNER') return jsonError(res,403,'Acesso de proprietário necessário.');
-    const deviceId = String(req.body?.deviceId || '').trim(); const mode = cleanMode(req.body?.mode); const name = String(req.body?.deviceName || '').trim().slice(0,100);
-    if (!deviceId || !mode || !name) return jsonError(res,400,'deviceId, mode e deviceName são obrigatórios.');
-    const now = new Date().toISOString(); const old = db.prepare('SELECT id,customer_id FROM devices WHERE id=?').get(deviceId);
-    if (old && old.customer_id !== 'owner') return jsonError(res,403,'Dispositivo pertence a outra conta.');
-    if (old) db.prepare('UPDATE devices SET mode=?,device_name=?,last_seen_at=? WHERE id=?').run(mode,name,now,deviceId);
-    else db.prepare('INSERT INTO devices VALUES(?,?,?,?,?,?)').run(deviceId,'owner',name,mode,now,now);
-    return res.json({ok:true,deviceId,mode});
-  });
-
-  app.post('/owner/commands', (req,res) => {
-    const user = verify(req); if (!user || user.role !== 'OWNER') return jsonError(res,403,'Acesso de proprietário necessário.');
-    const command = String(req.body?.command || '').trim(); const mode = cleanMode(req.body?.mode); const deviceId = String(req.body?.deviceId || '').trim();
-    if (!command || command.length > 2000 || !mode) return jsonError(res,400,'Comando ou modo inválido.');
-    if (deviceId) { const d = db.prepare('SELECT customer_id FROM devices WHERE id=?').get(deviceId); if (!d || d.customer_id !== 'owner') return jsonError(res,403,'Dispositivo não pertence ao proprietário.'); }
-    const id = crypto.randomUUID(); const now = new Date().toISOString();
-    db.prepare('INSERT INTO commands VALUES(?,?,?,?,?,?,?)').run(id,'owner',deviceId || null,mode,command,'queued',now);
-    return res.status(202).json({id,status:'queued',message:'Comando recebido pelo VÉRTICE.',executionPolicy:{scope:'somente_o_solicitado',preserveUnrequested:true}});
-  });
-
-  app.get('/commands/next', (req,res) => {
-    const user = verify(req);
-    if (!user) return jsonError(res,401,'Sessão inválida');
-    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
-    const deviceId = String(req.query?.deviceId || '').trim();
-    if (!deviceId) return jsonError(res,400,'deviceId é obrigatório.');
-    const customer = customerFor(user);
-    const device = db.prepare('SELECT id,customer_id,mode FROM devices WHERE id=?').get(deviceId);
-    if (!device || device.customer_id !== customer || device.mode !== 'operacao') return jsonError(res,403,'Terminal OPERAÇÃO não autorizado.');
-    const row = db.prepare('SELECT id,command,mode,status FROM commands WHERE customer_id=? AND device_id=? AND mode="operacao" AND status="queued" ORDER BY created_at ASC LIMIT 1').get(customer,deviceId);
-    if (!row) return res.json({ok:true,command:null});
-    const now = new Date().toISOString();
-    const changed = db.prepare('UPDATE commands SET status=? WHERE id=? AND customer_id=? AND status="queued"').run('running',row.id,customer);
-    if (!changed.changes) return res.json({ok:true,command:null});
-    row.status = 'running';
-    return res.json({ok:true,command:row});
-  });
-
-  app.post('/commands/:commandId/status', (req,res) => {
-    const user = verify(req);
-    if (!user) return jsonError(res,401,'Sessão inválida');
-    if (!activeCustomer(user)) return jsonError(res,402,'Assinatura não está ativa.');
-    const id = String(req.params.commandId || '').trim();
-    const status = String(req.body?.status || '').trim().toLowerCase();
-    const message = String(req.body?.message || '').trim().slice(0,1000);
-    if (!id || !['completed','failed','running'].includes(status)) return jsonError(res,400,'Status inválido.');
-    const customer = customerFor(user);
-    const command = db.prepare('SELECT id,customer_id,device_id,status FROM commands WHERE id=?').get(id);
-    if (!command || command.customer_id !== customer) return jsonError(res,404,'Comando não encontrado.');
-    if (command.status === 'completed' || command.status === 'failed') return res.json({ok:true,status:command.status});
-    const now = new Date().toISOString();
-    db.prepare('UPDATE commands SET status=? WHERE id=? AND customer_id=?').run(status,id,customer);
-    if (message) console.log(`[vertice] command ${id} ${status}: ${message}`);
-    return res.json({ok:true,status});
-  });
-}
-
-express.application.listen = function(...args) {
-  install(this);
-  return originalListen.apply(this,args);
-};
+express.application.listen=function(...args){install(this);return originalListen.apply(this,args);};
