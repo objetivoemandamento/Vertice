@@ -7,6 +7,12 @@ on:
 permissions:
   contents: write
 
+env:
+  VERTICE_KEYSTORE_BASE64: ${{ secrets.VERTICE_KEYSTORE_BASE64 }}
+  VERTICE_STORE_PASSWORD: ${{ secrets.VERTICE_STORE_PASSWORD }}
+  VERTICE_KEY_PASSWORD: ${{ secrets.VERTICE_KEY_PASSWORD }}
+  VERTICE_KEY_ALIAS: ${{ secrets.VERTICE_KEY_ALIAS }}
+
 jobs:
   validate-and-build:
     runs-on: ubuntu-latest
@@ -28,21 +34,41 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-      - name: Build debug APK
+      - name: Configure stable Android signing
+        if: ${{ env.VERTICE_KEYSTORE_BASE64 != '' && env.VERTICE_STORE_PASSWORD != '' && env.VERTICE_KEY_PASSWORD != '' && env.VERTICE_KEY_ALIAS != '' }}
+        run: |
+          printf '%s' "$VERTICE_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/vertice-release.jks"
+          echo "VERTICE_KEYSTORE_PATH=$RUNNER_TEMP/vertice-release.jks" >> "$GITHUB_ENV"
+          echo "Stable Android signing configured."
+      - name: Build signed release APK
+        if: ${{ env.VERTICE_KEYSTORE_BASE64 != '' && env.VERTICE_STORE_PASSWORD != '' && env.VERTICE_KEY_PASSWORD != '' && env.VERTICE_KEY_ALIAS != '' }}
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Build debug APK fallback
+        if: ${{ !(env.VERTICE_KEYSTORE_BASE64 != '' && env.VERTICE_STORE_PASSWORD != '' && env.VERTICE_KEY_PASSWORD != '' && env.VERTICE_KEY_ALIAS != '') }}
         run: gradle --no-daemon :app:assembleDebug
+      - name: Select APK
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            echo "APK_PATH=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_ENV"
+            echo "APK_NAME=app-release.apk" >> "$GITHUB_ENV"
+            echo "SIGNED_BUILD=true" >> "$GITHUB_ENV"
+          else
+            echo "APK_PATH=app/build/outputs/apk/debug/app-debug.apk" >> "$GITHUB_ENV"
+            echo "APK_NAME=app-debug.apk" >> "$GITHUB_ENV"
+            echo "SIGNED_BUILD=false" >> "$GITHUB_ENV"
+          fi
       - name: Publish APK release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="android-${GITHUB_RUN_NUMBER}"
-          APK="app/build/outputs/apk/debug/app-debug.apk"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$APK" --clobber
+            gh release upload "$TAG" "$APK_PATH" --clobber
           else
-            gh release create "$TAG" "$APK" --title "VÉRTICE ${GITHUB_RUN_NUMBER}" --notes "Build automático do VÉRTICE."
+            gh release create "$TAG" "$APK_PATH" --title "VÉRTICE ${GITHUB_RUN_NUMBER}" --notes "Build automático do VÉRTICE. Assinatura estável: ${SIGNED_BUILD}."
           fi
-          APK_URL="https://github.com/objetivoemandamento/Vertice/releases/download/${TAG}/app-debug.apk"
-          printf '{"versionCode":%s,"versionName":"1.4.4","apkUrl":"%s","notes":"Atualização automática do VÉRTICE."}\n' "$GITHUB_RUN_NUMBER" "$APK_URL" > update.json
+          APK_URL="https://github.com/objetivoemandamento/Vertice/releases/download/${TAG}/${APK_NAME}"
+          printf '{"versionCode":%s,"versionName":"1.4.4","apkUrl":"%s","notes":"Atualização automática do VÉRTICE.","signed":%s}\n' "$GITHUB_RUN_NUMBER" "$APK_URL" "$SIGNED_BUILD" > update.json
           CONTENT=$(base64 -w 0 update.json)
           SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/update.json" --jq '.sha')
           gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/update.json" \
@@ -52,6 +78,6 @@ jobs:
             -f branch='main'
       - uses: actions/upload-artifact@v4
         with:
-          name: VERTEX-v1.4.4-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: VERTEX-v1.4.4-apk
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
