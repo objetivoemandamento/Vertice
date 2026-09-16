@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate server JavaScript
-        run: node --check server/src/server.js && node --check server/src/vertice-preload.js
+        run: node --check server/src/server.js && node --check server/src/vertice-preload.js && node --check server/src/signup-preload.js && node --check server/src/ai-agent-preload.js
       - name: Validate server package JSON
         run: node -e "const p=require('./server/package.json'); JSON.parse(require('fs').readFileSync('server/package.json','utf8')); if(!p.engines?.node) process.exit(1); console.log('server/package.json OK; Node:',p.engines.node)"
       - name: Validate server dependency installation
