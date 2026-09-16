@@ -73,6 +73,10 @@ private fun openAccessibilitySettings(context: Context) { runCatching { context.
 private fun VerticeApp() {
     val context = LocalContext.current; val session = remember { VerticeSession(context) }; val api = remember { VerticeApi(BuildConfig.VERTICE_API_URL) }
     var token by remember { mutableStateOf(session.sessionToken) }; var role by remember { mutableStateOf(session.role) }; var mode by remember { mutableStateOf(session.mode) }; var permissionReady by remember { mutableStateOf(mode != "operacao" || accessibilityEnabled(context)) }; var signupOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val update = withContext(Dispatchers.IO) { UpdateManager.check(context) }
+        if (update != null) UpdateManager.downloadAndInstall(context, update)
+    }
     LaunchedEffect(api) { api.onAuthError = { session.clearLogin(); token = null; role = null; mode = null } }
     DisposableEffect(Unit) { val lifecycle = (context as? ComponentActivity)?.lifecycle; val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) permissionReady = mode != "operacao" || accessibilityEnabled(context) }; lifecycle?.addObserver(observer); onDispose { lifecycle?.removeObserver(observer) } }
     MaterialTheme(colorScheme = darkColorScheme()) { Surface(Modifier.fillMaxSize()) { when {
