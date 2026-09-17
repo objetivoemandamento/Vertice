@@ -69,6 +69,21 @@ jobs:
         with:
           gradle-version: "8.10.2"
 
+      - name: Prepare launcher manifest for system HOME role
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("app/src/main/AndroidManifest.xml")
+          s = p.read_text()
+          marker = '<category android:name="android.intent.category.LAUNCHER" />'
+          extra = marker + '\n                <category android:name="android.intent.category.HOME" />\n                <category android:name="android.intent.category.DEFAULT" />'
+          if 'android.intent.category.HOME' not in s:
+              if marker not in s:
+                  raise SystemExit("Launcher activity marker not found")
+              s = s.replace(marker, extra, 1)
+              p.write_text(s)
+          PY
+
       - name: Build VÉRTICE APK
         run: |
           gradle :app:assembleRelease --no-daemon --stacktrace
