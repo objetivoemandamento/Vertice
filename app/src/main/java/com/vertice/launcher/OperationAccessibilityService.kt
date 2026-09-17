@@ -174,11 +174,15 @@ class OperationAccessibilityService : AccessibilityService() {
         }?.packageName
     }
 
-    private fun openUrl(url: String): Pair<Boolean, String> = try {
+    private fun openUrl(url: String): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
-        startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-        true to "Site aberto: $url"
-    } catch (e: Exception) { false to "Não foi possível abrir o site: ${e.message ?: "erro"}" }
+        return try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true to "Site aberto: $url"
+        } catch (e: Exception) {
+            false to "Não foi possível abrir o site: ${e.message ?: "erro"}"
+        }
+    }
 
     private fun clickBySemanticTarget(label: String): Boolean {
         if (EmergencyState.isStopped(this)) return false
@@ -241,12 +245,30 @@ class OperationAccessibilityService : AccessibilityService() {
 
     private fun pressEnter(): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
-        val root = rootInActiveWindow; val focused = findFocusedEditable(root)
-        if (focused != null && android.os.Build.VERSION.SDK_INT >= 30 && focused.performAction(AccessibilityNodeInfo.ACTION_IME_ENTER)) return true to "Enter executado."
-        val nodes = mutableListOf<AccessibilityNodeInfo>(); collectNodes(root,nodes)
-        val button = nodes.firstOrNull { val t=normalize(it.text?.toString().orEmpty()); it.isClickable && t in setOf("enter","ok","enviar","buscar","search") }
-        if (button != null && button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true to "Ação enviada."
-        return false to "Não encontrei uma ação Enter/Enviar disponível."
+        val root = rootInActiveWindow ?: return false to "Não há janela ativa."
+        val focused = findFocusedEditable(root)
+        if (focused != null) {
+            val candidates = listOf("enter", "ok", "enviar", "buscar", "pesquisar", "confirmar", "continuar")
+            val nodes = mutableListOf<AccessibilityNodeInfo>()
+            collectNodes(root, nodes)
+            val button = nodes.firstOrNull { node ->
+                if (!node.isClickable || !node.isEnabled) return@firstOrNull false
+                val text = normalize(node.text?.toString().orEmpty())
+                val desc = normalize(node.contentDescription?.toString().orEmpty())
+                candidates.any { it == text || it == desc }
+            }
+            if (button != null && button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true to "Ação de confirmação executada."
+        }
+        val nodes = mutableListOf<AccessibilityNodeInfo>()
+        collectNodes(root, nodes)
+        val button = nodes.firstOrNull { node ->
+            if (!node.isClickable || !node.isEnabled) return@firstOrNull false
+            val text = normalize(node.text?.toString().orEmpty())
+            val desc = normalize(node.contentDescription?.toString().orEmpty())
+            text in setOf("enter", "ok", "enviar", "buscar", "pesquisar", "confirmar", "continuar") ||
+                desc in setOf("enter", "ok", "enviar", "buscar", "pesquisar", "confirmar", "continuar")
+        }
+        return if (button != null && button.performAction(AccessibilityNodeInfo.ACTION_CLICK)) true to "Ação de confirmação executada." else false to "Não encontrei uma ação Enter/Enviar disponível."
     }
 
     private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if (root==null)return null; if(root.isEditable&&root.isFocused)return root; for(i in 0 until root.childCount)findFocusedEditable(root.getChild(i))?.let{return it}; return null }
