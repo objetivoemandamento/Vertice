@@ -3,7 +3,7 @@
   "version": "1.4.4",
   "private": true,
   "engines": { "node": "22.x" },
-  "scripts": { "start": "node -r ./src/signup-preload.js -r ./src/ai-agent-preload.js -r ./src/apk-proxy.js src/server.js" },
+  "scripts": { "start": "node -r ./src/security-preload.js -r ./src/signup-preload.js -r ./src/ai-agent-preload.js -r ./src/apk-proxy.js src/server.js" },
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "better-sqlite3": "^11.10.0",
