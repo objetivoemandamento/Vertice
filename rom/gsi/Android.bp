@@ -1,0 +1,21 @@
+android_app_import {
+    name: "VerticeLauncher",
+    apk: "prebuilt/VerticeLauncher.apk",
+    certificate: "platform",
+    privileged: true,
+    overrides: [
+        "Launcher3",
+        "Launcher3QuickStep",
+        "Trebuchet",
+    ],
+    required: [
+        "privapp-permissions-vertice",
+    ],
+}
+
+prebuilt_etc {
+    name: "privapp-permissions-vertice",
+    src: "privapp-permissions-vertice.xml",
+    sub_dir: "permissions",
+    filename_from_src: true,
+}
