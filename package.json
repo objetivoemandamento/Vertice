@@ -3,7 +3,8 @@
   "private": true,
   "version": "1.4.4",
   "scripts": {
-    "start": "node server/src/server.js"
+    "start": "node server/src/server.js",
+    "quality:90": "node scripts/quality-gate-90.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
