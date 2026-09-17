@@ -23,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.math.min
 
@@ -64,7 +65,7 @@ class OperationAccessibilityService : AccessibilityService() {
                                 try { executeCommand(token, deviceId, command) }
                                 catch (e: Exception) {
                                     Log.e(TAG, "Erro ${command.id}: ${e.message}", e)
-                                    runCatching { api.updateCommandStatus(token, command.id, "failed", "Erro inesperado: ${e.message ?: "erro"}", deviceId) }
+                                    runCatching { api.updateCommandStatus(token, command.id, "unknown", "Erro inesperado; resultado não confirmado: ${e.message ?: "erro"}", deviceId) }
                                 } finally { commandInFlight = false }
                             }
                         }
@@ -81,19 +82,39 @@ class OperationAccessibilityService : AccessibilityService() {
             runCatching { api.updateCommandStatus(token, command.id, "cancelled", "Execução bloqueada pelo botão de emergência.", deviceId) }
             return
         }
-        val result = performCommandPlan(command.command, safety.generation)
-        val status = when {
-            EmergencyState.isStopped(this) -> "cancelled"
-            EmergencyState.generation(this) != safety.generation -> "cancelled"
-            result.first -> "completed"
-            else -> "failed"
+        val leaseLost = AtomicBoolean(false)
+        val heartbeatJob = scope.launch {
+            var failures = 0
+            while (isActive && !leaseLost.get()) {
+                delay(HEARTBEAT_INTERVAL_MS)
+                val heartbeat = api.heartbeatCommand(token, command.id, command.executionId, command.leaseId, deviceId)
+                if (heartbeat.isSuccess) failures = 0
+                else {
+                    failures += 1
+                    Log.w(TAG, "Heartbeat ${command.id} falhou ($failures): ${heartbeat.exceptionOrNull()?.message}")
+                    if (failures >= MAX_HEARTBEAT_FAILURES) leaseLost.set(true)
+                }
+            }
         }
-        api.updateCommandStatus(token, command.id, status, result.second, deviceId)
-            .onFailure { e -> Log.e(TAG, "Status ${command.id}: ${e.message}") }
+        try {
+            val result = performCommandPlan(command.command, safety.generation, leaseLost)
+            val status = when {
+                EmergencyState.isStopped(this) -> "cancelled"
+                EmergencyState.generation(this) != safety.generation -> "cancelled"
+                leaseLost.get() -> "unknown"
+                result.first -> "completed"
+                else -> "failed"
+            }
+            api.updateCommandStatus(token, command.id, status, result.second, deviceId)
+                .onFailure { e -> Log.e(TAG, "Status ${command.id}: ${e.message}") }
+        } finally {
+            heartbeatJob.cancel()
+        }
     }
 
-    private suspend fun performCommandPlan(raw: String, expectedGeneration: Long): Pair<Boolean, String> {
+    private suspend fun performCommandPlan(raw: String, expectedGeneration: Long, leaseLost: AtomicBoolean): Pair<Boolean, String> {
         if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+        if (leaseLost.get()) return false to "Lease da execução perdido; resultado marcado como UNKNOWN."
         val text = raw.trim()
         if (text.isBlank()) return false to "Comando vazio."
         val steps = text.split(Regex("\\s+(?:e|depois|então|entao)\\s+"))
@@ -101,15 +122,18 @@ class OperationAccessibilityService : AccessibilityService() {
         val results = mutableListOf<String>()
         for ((index, step) in steps.withIndex()) {
             if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência após $index passo(s)."
+            if (leaseLost.get()) return false to "Lease da execução perdido após $index passo(s); resultado UNKNOWN."
             val before = uiFingerprint()
             val result = withContext(Dispatchers.Main.immediate) { performSingleCommand(step) }
             if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+            if (leaseLost.get()) return false to "Lease da execução perdido após o passo ${index + 1}; resultado UNKNOWN."
             results += result.second
             if (!result.first) return false to "Passo ${index + 1} falhou: ${result.second}"
             if (index < steps.lastIndex) {
-                val progressed = waitForUiProgress(before, 2500L, expectedGeneration)
+                val progressed = waitForUiProgress(before, 2500L, expectedGeneration, leaseLost)
                 if (!progressed) return false to "Passo ${index + 1} executado, mas a tela não apresentou mudança verificável."
                 if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+                if (leaseLost.get()) return false to "Lease da execução perdido; resultado UNKNOWN."
                 delay(350L)
             }
         }
@@ -234,8 +258,7 @@ class OperationAccessibilityService : AccessibilityService() {
         if (x < 0 || y < 0 || x > dm.widthPixels || y > dm.heightPixels) return false to "Coordenada fora da tela."
         val path = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
         val duration = if (long) 700L else 90L
-        val outcome = dispatchGestureAwait(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build())
-        return when (outcome) {
+        return when (dispatchGestureAwait(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build())) {
             GestureOutcome.COMPLETED -> true to if (long) "Pressão longa concluída em ($x, $y)." else "Toque concluído em ($x, $y)."
             GestureOutcome.DISPATCHED_PENDING -> false to "O Android aceitou o gesto, mas não confirmou sua conclusão."
             GestureOutcome.CANCELLED -> false to "O Android cancelou o gesto."
@@ -308,7 +331,7 @@ class OperationAccessibilityService : AccessibilityService() {
     private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if (root==null)return null; if(root.isEditable&&root.isFocused)return root; for(i in 0 until root.childCount)findFocusedEditable(root.getChild(i))?.let{return it}; return null }
     private fun findFirstEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if(root==null)return null; if(root.isEditable&&root.isEnabled)return root; for(i in 0 until root.childCount)findFirstEditable(root.getChild(i))?.let{return it}; return null }
     private fun uiFingerprint(): String { val root=rootInActiveWindow?:return ""; val nodes=mutableListOf<AccessibilityNodeInfo>(); collectNodes(root,nodes); return root.packageName?.toString().orEmpty()+"|"+nodes.take(24).joinToString(";"){normalize(it.text?.toString().orEmpty())+":"+normalize(it.contentDescription?.toString().orEmpty())} }
-    private suspend fun waitForUiProgress(before:String,timeoutMs:Long,expectedGeneration:Long):Boolean { val end=System.currentTimeMillis()+timeoutMs; while(System.currentTimeMillis()<end){if(!EmergencyState.canContinue(this,expectedGeneration))return false;if(uiFingerprint()!=before)return true;delay(120)};return false }
+    private suspend fun waitForUiProgress(before:String,timeoutMs:Long,expectedGeneration:Long,leaseLost:AtomicBoolean):Boolean { val end=System.currentTimeMillis()+timeoutMs; while(System.currentTimeMillis()<end){if(!EmergencyState.canContinue(this,expectedGeneration)||leaseLost.get())return false;if(uiFingerprint()!=before)return true;delay(120)};return false }
     private fun normalize(value:String):String=value.trim().lowercase().replace(Regex("\\s+")," ")
 
     override fun onDestroy(){scope.cancel();serviceJob.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
@@ -318,6 +341,8 @@ class OperationAccessibilityService : AccessibilityService() {
         private const val MAX_PLAN_STEPS=12
         private const val MAX_NODES=500
         private const val GESTURE_CONFIRM_TIMEOUT_MS=2500L
+        private const val HEARTBEAT_INTERVAL_MS=10_000L
+        private const val MAX_HEARTBEAT_FAILURES=2
         private val appPackages=mapOf("whatsapp" to "com.whatsapp","instagram" to "com.instagram.android","facebook" to "com.facebook.katana","youtube" to "com.google.android.youtube","chrome" to "com.android.chrome","navegador" to "com.android.chrome","google" to "com.android.chrome","mercado livre" to "com.mercadolibre","mercadolivre" to "com.mercadolibre","play store" to "com.android.vending","gmail" to "com.google.android.gm")
     }
 }
