@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const { ISSUER, AUDIENCE, ACCESS_TTL, tokenClaims, signOptions, verifyOptions } = require('./auth-policy');
+const c = tokenClaims('user-1', 'x@example.com', 'CUSTOMER');
+assert.equal(c.sub, 'user-1');
+assert.equal(c.role, 'CUSTOMER');
+assert.ok(c.jti);
+assert.equal(signOptions().issuer, ISSUER);
+assert.equal(signOptions().audience, AUDIENCE);
+assert.equal(signOptions().expiresIn, ACCESS_TTL);
+assert.deepEqual(verifyOptions().algorithms, ['HS256']);
+assert.equal(verifyOptions().issuer, ISSUER);
+assert.equal(verifyOptions().audience, AUDIENCE);
+console.log('auth-policy: PASS');
