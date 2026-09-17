@@ -2,6 +2,7 @@ package com.vertice.launcher
 
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
@@ -73,20 +74,27 @@ class PermissionGateActivity : ComponentActivity() {
         onContinue: () -> Unit
     ) {
         var dismissed by remember { mutableStateOf(false) }
+        val needsRestrictedSettings = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
         Surface(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().padding(22.dp), verticalArrangement = Arrangement.Center) {
                 Text("PREPARAR VÉRTICE", fontSize = 30.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(10.dp))
-                Text("O VÉRTICE verifica automaticamente pela rede se existe uma versão nova sempre que o aplicativo é iniciado.")
+                Text("Para o VÉRTICE operar no celular, é necessário ativar o serviço de acessibilidade.")
                 Spacer(Modifier.height(16.dp))
-                Text("1. Abra as informações do aplicativo.", fontWeight = FontWeight.SemiBold)
-                Text("2. Toque em ⋮ e procure “Permitir configurações restritas”.")
-                Text("3. Ative essa opção.")
-                Text("4. Depois abra Acessibilidade e ative “VÉRTICE Operação”.")
-                Spacer(Modifier.height(16.dp))
-                Button(onClick = { openAppDetails() }, modifier = Modifier.fillMaxWidth()) { Text("1 — ABRIR INFORMAÇÕES DO APP") }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(onClick = { openAccessibility() }, modifier = Modifier.fillMaxWidth()) { Text("2 — ABRIR ACESSIBILIDADE") }
+                if (needsRestrictedSettings) {
+                    Text("1. Abra as informações do aplicativo.", fontWeight = FontWeight.SemiBold)
+                    Text("2. No menu ⋮, procure “Permitir configurações restritas” e ative.")
+                    Text("3. Depois abra Acessibilidade e ative “VÉRTICE Operação”.")
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { openAppDetails() }, modifier = Modifier.fillMaxWidth()) { Text("1 — ABRIR INFORMAÇÕES DO APP") }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = { openAccessibility() }, modifier = Modifier.fillMaxWidth()) { Text("2 — ABRIR ACESSIBILIDADE") }
+                } else {
+                    Text("1. Abra Acessibilidade.", fontWeight = FontWeight.SemiBold)
+                    Text("2. Entre em Serviços instalados e ative “VÉRTICE Operação”.")
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = { openAccessibility() }, modifier = Modifier.fillMaxWidth()) { Text("ABRIR ACESSIBILIDADE") }
+                }
                 Spacer(Modifier.height(14.dp))
                 Button(onClick = onContinue, modifier = Modifier.fillMaxWidth()) { Text("CONTINUAR PARA O VÉRTICE") }
             }
