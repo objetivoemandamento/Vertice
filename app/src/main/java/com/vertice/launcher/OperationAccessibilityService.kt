@@ -20,7 +20,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import kotlin.math.min
 
 /** VÉRTICE real Android operator: objetivo -> observar -> agir -> validar -> próxima ação. */
@@ -104,7 +107,8 @@ class OperationAccessibilityService : AccessibilityService() {
             results += result.second
             if (!result.first) return false to "Passo ${index + 1} falhou: ${result.second}"
             if (index < steps.lastIndex) {
-                waitForUiProgress(before, 2500L, expectedGeneration)
+                val progressed = waitForUiProgress(before, 2500L, expectedGeneration)
+                if (!progressed) return false to "Passo ${index + 1} executado, mas a tela não apresentou mudança verificável."
                 if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
                 delay(350L)
             }
@@ -112,7 +116,7 @@ class OperationAccessibilityService : AccessibilityService() {
         return true to results.joinToString(" ")
     }
 
-    private fun performSingleCommand(raw: String): Pair<Boolean, String> {
+    private suspend fun performSingleCommand(raw: String): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val text = raw.trim(); val lower = text.lowercase()
         if (text.isBlank()) return false to "Comando vazio."
@@ -184,7 +188,7 @@ class OperationAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun clickBySemanticTarget(label: String): Boolean {
+    private suspend fun clickBySemanticTarget(label: String): Boolean {
         if (EmergencyState.isStopped(this)) return false
         val needle = normalize(label); val nodes = mutableListOf<AccessibilityNodeInfo>(); collectNodes(rootInActiveWindow, nodes)
         val target = nodes.firstOrNull { node ->
@@ -200,7 +204,7 @@ class OperationAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) { collectNodes(node.getChild(i), out); if (out.size >= MAX_NODES) return }
     }
 
-    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+    private suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
         if (EmergencyState.isStopped(this)) return false
         var current: AccessibilityNodeInfo? = node
         repeat(8) {
@@ -211,7 +215,7 @@ class OperationAccessibilityService : AccessibilityService() {
         return tapNodeCenter(node)
     }
 
-    private fun longClickByText(label: String): Boolean {
+    private suspend fun longClickByText(label: String): Boolean {
         if (EmergencyState.isStopped(this)) return false
         val needle = normalize(label); val nodes = mutableListOf<AccessibilityNodeInfo>(); collectNodes(rootInActiveWindow, nodes)
         val node = nodes.firstOrNull { normalize(it.text?.toString().orEmpty()).contains(needle) } ?: return false
@@ -219,28 +223,58 @@ class OperationAccessibilityService : AccessibilityService() {
         return tapNodeCenter(node, true)
     }
 
-    private fun tapNodeCenter(node: AccessibilityNodeInfo, long: Boolean = false): Boolean {
+    private suspend fun tapNodeCenter(node: AccessibilityNodeInfo, long: Boolean = false): Boolean {
         val r = android.graphics.Rect(); node.getBoundsInScreen(r)
         return r.width() > 0 && r.height() > 0 && tapAt(r.exactCenterX(), r.exactCenterY(), long).first
     }
 
-    private fun tapAt(x: Float, y: Float, long: Boolean = false): Pair<Boolean, String> {
+    private suspend fun tapAt(x: Float, y: Float, long: Boolean = false): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val dm = resources.displayMetrics
         if (x < 0 || y < 0 || x > dm.widthPixels || y > dm.heightPixels) return false to "Coordenada fora da tela."
         val path = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
         val duration = if (long) 700L else 90L
-        val accepted = dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build(), null, null)
-        return if (accepted) true to if (long) "Pressão longa executada em ($x, $y)." else "Toque executado em ($x, $y)." else false to "O Android não aceitou o toque."
+        val outcome = dispatchGestureAwait(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build())
+        return when (outcome) {
+            GestureOutcome.COMPLETED -> true to if (long) "Pressão longa concluída em ($x, $y)." else "Toque concluído em ($x, $y)."
+            GestureOutcome.DISPATCHED_PENDING -> false to "O Android aceitou o gesto, mas não confirmou sua conclusão."
+            GestureOutcome.CANCELLED -> false to "O Android cancelou o gesto."
+            GestureOutcome.DISPATCH_REJECTED -> false to "O Android não aceitou o toque."
+        }
     }
 
-    private fun swipe(direction: String): Pair<Boolean, String> {
+    private suspend fun swipe(direction: String): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val dm = resources.displayMetrics; val w = dm.widthPixels.toFloat(); val h = dm.heightPixels.toFloat()
         val p = when (direction.lowercase()) { "cima" -> listOf(w/2,h*.78f,w/2,h*.22f); "esquerda" -> listOf(w*.80f,h/2,w*.20f,h/2); "direita" -> listOf(w*.20f,h/2,w*.80f,h/2); else -> listOf(w/2,h*.22f,w/2,h*.78f) }
         val path = Path().apply { moveTo(p[0],p[1]); lineTo(p[2],p[3]) }
-        val accepted = dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,450)).build(),null,null)
-        return if (accepted) true to "Deslize executado para $direction." else false to "O Android não aceitou o gesto."
+        return when (dispatchGestureAwait(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,450)).build())) {
+            GestureOutcome.COMPLETED -> true to "Deslize concluído para $direction."
+            GestureOutcome.DISPATCHED_PENDING -> false to "O Android aceitou o gesto, mas não confirmou sua conclusão."
+            GestureOutcome.CANCELLED -> false to "O Android cancelou o gesto."
+            GestureOutcome.DISPATCH_REJECTED -> false to "O Android não aceitou o gesto."
+        }
+    }
+
+    private suspend fun dispatchGestureAwait(gesture: GestureDescription): GestureOutcome {
+        val callbackResult = withTimeoutOrNull(GESTURE_CONFIRM_TIMEOUT_MS) {
+            suspendCancellableCoroutine<GestureOutcome> { continuation ->
+                val accepted = dispatchGesture(
+                    gesture,
+                    object : GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            if (continuation.isActive) continuation.resume(GestureOutcomeResolver.callback(true))
+                        }
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            if (continuation.isActive) continuation.resume(GestureOutcomeResolver.callback(false))
+                        }
+                    },
+                    mainHandler
+                )
+                if (!accepted && continuation.isActive) continuation.resume(GestureOutcomeResolver.initial(false))
+            }
+        }
+        return callbackResult ?: GestureOutcome.DISPATCHED_PENDING
     }
 
     private fun pressEnter(): Pair<Boolean, String> {
@@ -283,6 +317,7 @@ class OperationAccessibilityService : AccessibilityService() {
         private const val TAG="VerticeOperation"
         private const val MAX_PLAN_STEPS=12
         private const val MAX_NODES=500
+        private const val GESTURE_CONFIRM_TIMEOUT_MS=2500L
         private val appPackages=mapOf("whatsapp" to "com.whatsapp","instagram" to "com.instagram.android","facebook" to "com.facebook.katana","youtube" to "com.google.android.youtube","chrome" to "com.android.chrome","navegador" to "com.android.chrome","google" to "com.android.chrome","mercado livre" to "com.mercadolibre","mercadolivre" to "com.mercadolibre","play store" to "com.android.vending","gmail" to "com.google.android.gm")
     }
 }
