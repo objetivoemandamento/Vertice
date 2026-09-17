@@ -3,7 +3,7 @@ package com.vertice.launcher
 import android.content.Context
 import java.util.UUID
 
-/** Sessão persistente: armazena token, identidade e modo operacional; nunca a senha. */
+/** Sessão persistente: armazena token, identidade, modo e estado de autonomia; nunca a senha. */
 class VerticeSession(context: Context) {
     private val prefs = context.getSharedPreferences("vertice_session", Context.MODE_PRIVATE)
     val deviceId: String
@@ -20,5 +20,8 @@ class VerticeSession(context: Context) {
     var email: String
         get() = prefs.getString("email", "") ?: ""
         set(value) { prefs.edit().putString("email", value).apply() }
+    var emergencyStop: Boolean
+        get() = prefs.getBoolean("emergency_stop", false)
+        set(value) { prefs.edit().putBoolean("emergency_stop", value).apply() }
     fun clearLogin() = prefs.edit().remove("session_token").remove("email").remove("role").remove("mode").apply()
 }
