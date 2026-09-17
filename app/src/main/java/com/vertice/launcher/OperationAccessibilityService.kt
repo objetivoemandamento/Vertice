@@ -73,32 +73,39 @@ class OperationAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun executeCommand(token: String, deviceId: String, command: QueuedCommand) {
-        if (EmergencyState.isStopped(this)) {
+        val safety = EmergencyState.snapshot(this)
+        if (safety.stopped) {
             runCatching { api.updateCommandStatus(token, command.id, "cancelled", "Execução bloqueada pelo botão de emergência.", deviceId) }
             return
         }
-        val result = performCommandPlan(command.command)
-        val status = when { EmergencyState.isStopped(this) -> "cancelled"; result.first -> "completed"; else -> "failed" }
+        val result = performCommandPlan(command.command, safety.generation)
+        val status = when {
+            EmergencyState.isStopped(this) -> "cancelled"
+            EmergencyState.generation(this) != safety.generation -> "cancelled"
+            result.first -> "completed"
+            else -> "failed"
+        }
         api.updateCommandStatus(token, command.id, status, result.second, deviceId)
             .onFailure { e -> Log.e(TAG, "Status ${command.id}: ${e.message}") }
     }
 
-    private suspend fun performCommandPlan(raw: String): Pair<Boolean, String> {
-        if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
+    private suspend fun performCommandPlan(raw: String, expectedGeneration: Long): Pair<Boolean, String> {
+        if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
         val text = raw.trim()
         if (text.isBlank()) return false to "Comando vazio."
         val steps = text.split(Regex("\\s+(?:e|depois|então|entao)\\s+"))
             .map(String::trim).filter(String::isNotBlank).take(MAX_PLAN_STEPS)
         val results = mutableListOf<String>()
         for ((index, step) in steps.withIndex()) {
-            if (EmergencyState.isStopped(this)) return false to "Execução interrompida pelo botão de emergência após $index passo(s)."
+            if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência após $index passo(s)."
             val before = uiFingerprint()
             val result = withContext(Dispatchers.Main.immediate) { performSingleCommand(step) }
+            if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
             results += result.second
             if (!result.first) return false to "Passo ${index + 1} falhou: ${result.second}"
             if (index < steps.lastIndex) {
-                waitForUiProgress(before, 2500L)
-                if (EmergencyState.isStopped(this)) return false to "Execução interrompida pelo botão de emergência."
+                waitForUiProgress(before, 2500L, expectedGeneration)
+                if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
                 delay(350L)
             }
         }
@@ -245,7 +252,7 @@ class OperationAccessibilityService : AccessibilityService() {
     private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if (root==null)return null; if(root.isEditable&&root.isFocused)return root; for(i in 0 until root.childCount)findFocusedEditable(root.getChild(i))?.let{return it}; return null }
     private fun findFirstEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if(root==null)return null; if(root.isEditable&&root.isEnabled)return root; for(i in 0 until root.childCount)findFirstEditable(root.getChild(i))?.let{return it}; return null }
     private fun uiFingerprint(): String { val root=rootInActiveWindow?:return ""; val nodes=mutableListOf<AccessibilityNodeInfo>(); collectNodes(root,nodes); return root.packageName?.toString().orEmpty()+"|"+nodes.take(24).joinToString(";"){normalize(it.text?.toString().orEmpty())+":"+normalize(it.contentDescription?.toString().orEmpty())} }
-    private suspend fun waitForUiProgress(before:String,timeoutMs:Long):Boolean { val end=System.currentTimeMillis()+timeoutMs; while(System.currentTimeMillis()<end){if(EmergencyState.isStopped(this))return false;if(uiFingerprint()!=before)return true;delay(120)};return false }
+    private suspend fun waitForUiProgress(before:String,timeoutMs:Long,expectedGeneration:Long):Boolean { val end=System.currentTimeMillis()+timeoutMs; while(System.currentTimeMillis()<end){if(!EmergencyState.canContinue(this,expectedGeneration))return false;if(uiFingerprint()!=before)return true;delay(120)};return false }
     private fun normalize(value:String):String=value.trim().lowercase().replace(Regex("\\s+")," ")
 
     override fun onDestroy(){scope.cancel();serviceJob.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
