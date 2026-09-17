@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server/src/server.js",
     "test:execution": "node server/src/execution/command-state.test.js && node server/src/execution/lease-store.test.js && node server/src/execution/action-plan.test.js && node server/src/security/auth-policy.test.js && node server/src/security/rate-limit.test.js && node server/src/execution/verification.test.js && node server/src/db/postgres.test.js",
+    "test:security": "node server/src/security-preload.test.js && node server/src/security/auth-policy.test.js && node server/src/security/rate-limit.test.js",
     "quality:90": "node scripts/quality-gate-90.js"
   },
   "dependencies": {
