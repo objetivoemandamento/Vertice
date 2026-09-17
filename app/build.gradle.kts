@@ -9,7 +9,8 @@ android {
     compileSdk = 35
     defaultConfig {
         applicationId = "com.vertice.launcher"
-        minSdk = 23
+        // GestureDescription/dispatchGesture exigem API 24+. Evita incompatibilidade real em Android 6.
+        minSdk = 24
         targetSdk = 35
         versionCode = (System.getenv("VERTICE_BUILD_NUMBER") ?: "18").toInt()
         versionName = "1.4.4"
