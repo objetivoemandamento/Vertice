@@ -8,10 +8,12 @@ const files = {
   state: path.join(root, 'server', 'src', 'execution', 'command-state.js'),
   lease: path.join(root, 'server', 'src', 'execution', 'lease-store.js'),
   plan: path.join(root, 'server', 'src', 'execution', 'action-plan.js'),
+  securityPreload: path.join(root, 'server', 'src', 'security-preload.js'),
+  postgres: path.join(root, 'server', 'src', 'db', 'postgres.js'),
 };
 function read(file) { try { return fs.readFileSync(file, 'utf8'); } catch { return ''; } }
-const server = read(files.server), preload = read(files.preload), state = read(files.state), lease = read(files.lease), plan = read(files.plan);
-const all = `${server}\n${preload}\n${state}\n${lease}\n${plan}`;
+const server = read(files.server), preload = read(files.preload), state = read(files.state), lease = read(files.lease), plan = read(files.plan), securityPreload = read(files.securityPreload), postgres = read(files.postgres);
+const all = `${server}\n${preload}\n${state}\n${lease}\n${plan}\n${securityPreload}`;
 const androidRoot = path.join(root, 'app', 'src', 'main', 'java', 'com', 'vertice', 'launcher');
 const accessibility = read(path.join(androidRoot, 'OperationAccessibilityService.kt'));
 
@@ -21,6 +23,8 @@ const checks = [
   { area: 'Security', critical: true, name: 'Production JWT secret is mandatory', pass: /JWT_SECRET.*obrigat/.test(server) || /JWT_SECRET.*obrigat/.test(preload) },
   { area: 'Security', critical: true, name: 'Production owner credentials are environment-bound', pass: /OWNER_LOGIN.*OWNER_PASSWORD/.test(preload) || /OWNER_LOGIN.*OWNER_PASSWORD/.test(server) },
   { area: 'Security', critical: true, name: 'JWT verification is used', pass: /jwt\.verify/.test(all) },
+  { area: 'Security', critical: true, name: 'Request rate limiting is installed at the app boundary', pass: /SlidingWindowRateLimiter/.test(securityPreload) && /express\.application\.use/.test(securityPreload) },
+  { area: 'Security', critical: true, name: 'Security headers are installed', pass: /X-Content-Type-Options/.test(securityPreload) && /Referrer-Policy/.test(securityPreload) },
   { area: 'Authorization', critical: true, name: 'Owner role is checked server-side', pass: /role===['\"]OWNER['\"]/.test(all) },
   { area: 'Authorization', critical: true, name: 'Device ownership is checked', pass: /customer_id!==customer\(u\)|customer_id!=='owner'/.test(all) },
   { area: 'Command Queue', critical: true, name: 'Commands have queued/running/terminal lifecycle', pass: /queued/.test(all) && /running/.test(all) && /completed/.test(all) && /failed/.test(all) },
@@ -28,6 +32,7 @@ const checks = [
   { area: 'Command Queue', critical: true, name: 'Explicit UNKNOWN state exists', pass: /unknown/.test(state) && /unknown/.test(all) },
   { area: 'Execution Lease', critical: true, name: 'Execution lease primitives exist', pass: /createExecution/.test(lease) && /renew/.test(lease) && /canFinalize/.test(lease) },
   { area: 'Execution Lease', critical: true, name: 'Lease expiration is explicit', pass: /expiresAt/.test(lease) && /expired/.test(lease) },
+  { area: 'Execution Lease', critical: true, name: 'Heartbeat endpoint is implemented', pass: /\/commands\/:commandId\/heartbeat/.test(preload) && /heartbeat_at/.test(preload) },
   { area: 'Idempotency', critical: true, name: 'Payment creation uses idempotency key', pass: /X-Idempotency-Key/.test(all) },
   { area: 'Android Contract', critical: true, name: 'Operation mode is explicit', pass: /operacao/.test(all) },
   { area: 'Emergency Stop', critical: true, name: 'Emergency state exists in Android project', pass: fs.existsSync(path.join(androidRoot, 'EmergencyState.kt')) },
@@ -37,7 +42,9 @@ const checks = [
   { area: 'AI Safety', critical: true, name: 'AI instruction forbids invented data', pass: /não invente dados/i.test(all) },
   { area: 'Planning Safety', critical: true, name: 'Structured action plan has risk levels', pass: /R0/.test(plan) && /R1/.test(plan) && /R2/.test(plan) && /R3/.test(plan) },
   { area: 'Planning Safety', critical: true, name: 'Sensitive actions can require confirmation', pass: /requiresConfirmation/.test(plan) && /R2/.test(plan) },
-  { area: 'Android Reliability', critical: true, name: 'Gesture callback is present before claiming gesture completion', pass: /GestureResultCallback/.test(accessibility) },
+  { area: 'Android Reliability', critical: true, name: 'Gesture callback is present before claiming gesture completion', pass: /GestureResultCallback/.test(accessibility) && /GestureOutcome\.COMPLETED/.test(accessibility) },
+  { area: 'Android Reliability', critical: true, name: 'Android heartbeat is active during command execution', pass: /heartbeatCommand/.test(accessibility) && /HEARTBEAT_INTERVAL_MS/.test(accessibility) },
+  { area: 'Persistence', critical: true, name: 'Managed PostgreSQL adapter exists', pass: /createPool/.test(postgres) && /ensureSchema/.test(postgres) },
 ];
 
 const grouped = new Map();
