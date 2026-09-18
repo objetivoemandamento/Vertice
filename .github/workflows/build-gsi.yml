@@ -1,0 +1,197 @@
+name: Build VÉRTICE GSI — device-targeted profiles
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [gsi-android-go-3-device]
+    paths:
+      - ".github/workflows/build-gsi.yml"
+      - "rom/gsi/**"
+      - "app/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+
+permissions:
+  contents: read
+
+env:
+  AOSP_JOBS: 8
+  GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
+
+jobs:
+  build-gsi:
+    name: ${{ matrix.name }}
+    runs-on: ${{ vars.VERTICE_AOSP_RUNNER || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Galaxy A04 — Android 12 GSI ARM64
+            device: galaxy-a04
+            branch: android12-gsi
+            product: vertice_a04
+            base_product: gsi_arm64
+            java: "11"
+          - name: Redmi 9A — Android 10 Legacy ARM32/Binder64
+            device: redmi-9a
+            branch: android10-gsi
+            product: vertice_redmi9a
+            base_product: aosp_arm_64b_ab
+            java: "8"
+
+    steps:
+      - name: Checkout VÉRTICE
+        uses: actions/checkout@v4
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /opt/ghc /usr/share/dotnet || true
+          sudo docker system prune -af || true
+          df -h
+
+      - name: Install AOSP host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y adb bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses6 lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses6 libncurses-dev libssl-dev libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+
+      - name: Install repo
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod +x "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
+      - name: Java 17 for VÉRTICE APK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+
+      - name: Configure Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Build VÉRTICE APK
+        run: |
+          set -euxo pipefail
+          gradle :app:assembleRelease --no-daemon --stacktrace
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+          test -s "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/apk-dist"
+          cp "$APK" "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk"
+          sha256sum "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk"
+
+      - name: AOSP Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Sync exact AOSP GSI branch
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/aosp"
+          cd "$GITHUB_WORKSPACE/aosp"
+          repo init -u https://android.googlesource.com/platform/manifest -b "${{ matrix.branch }}" --depth=1
+          repo sync -c --no-tags --optimized-fetch --prune -j"$AOSP_JOBS"
+
+      - name: Inject VÉRTICE without modifying upstream product files
+        run: |
+          cd "$GITHUB_WORKSPACE/aosp"
+          mkdir -p device/vertice/gsi/prebuilt
+          cp "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk" device/vertice/gsi/prebuilt/VerticeLauncher.apk
+          cp "$GITHUB_WORKSPACE/rom/gsi/Android.bp" device/vertice/gsi/Android.bp
+          cp "$GITHUB_WORKSPACE/rom/gsi/AndroidProducts.mk" device/vertice/gsi/AndroidProducts.mk
+          cp "$GITHUB_WORKSPACE/rom/gsi/vertice_gsi.mk" device/vertice/gsi/vertice_gsi.mk
+          if [ "${{ matrix.device }}" = "galaxy-a04" ]; then
+            BASE="$(find build/make/target/product -type f -name 'gsi_arm64.mk' -print -quit)"
+            test -n "$BASE"
+            BASE_DIR="$(dirname "$BASE" | sed 's#^build/make/target/product/##')"
+            printf '$(call inherit-product, $(SRC_TARGET_DIR)/product/%s/gsi_arm64.mk)\n' "$BASE_DIR" > device/vertice/gsi/base_a04.mk
+            cp "$GITHUB_WORKSPACE/rom/gsi/vertice_a04.mk" device/vertice/gsi/vertice_a04.mk
+          else
+            BASE="$(find build/make/target/product -type f -name 'aosp_arm_64b_ab.mk' -print -quit)"
+            test -n "$BASE"
+            BASE_DIR="$(dirname "$BASE" | sed 's#^build/make/target/product/##')"
+            printf '$(call inherit-product, $(SRC_TARGET_DIR)/product/%s/aosp_arm_64b_ab.mk)\n' "$BASE_DIR" > device/vertice/gsi/base_redmi9a.mk
+            cp "$GITHUB_WORKSPACE/rom/gsi/vertice_redmi9a.mk" device/vertice/gsi/vertice_redmi9a.mk
+          fi
+          cp "$GITHUB_WORKSPACE/rom/gsi/privapp-permissions-vertice.xml" device/vertice/gsi/privapp-permissions-vertice.xml
+
+      - name: Verify base product exists
+        run: |
+          cd "$GITHUB_WORKSPACE/aosp"
+          if [ "${{ matrix.device }}" = "galaxy-a04" ]; then
+            find build/make/target/product -type f -name "gsi_arm64.mk" -print -quit | grep -q .
+            test -f device/vertice/gsi/base_a04.mk
+          else
+            find build/make/target/product -type f -name "aosp_arm_64b_ab.mk" -print -quit | grep -q .
+            test -f device/vertice/gsi/base_redmi9a.mk
+          fi
+
+      - name: Configure VÉRTICE product
+        run: |
+          cd "$GITHUB_WORKSPACE/aosp"
+          source build/envsetup.sh
+          lunch "${{ matrix.product }}-userdebug"
+
+      - name: Build system image
+        run: |
+          cd "$GITHUB_WORKSPACE/aosp"
+          source build/envsetup.sh
+          lunch "${{ matrix.product }}-userdebug"
+          m -j"$AOSP_JOBS" systemimage
+
+      - name: Validate VÉRTICE system image
+        run: |
+          set -euxo pipefail
+          cd "$GITHUB_WORKSPACE/aosp"
+          OUT="out/target/product/${{ matrix.product }}"
+          test -s "$OUT/system.img"
+          grep -R -q "ro.config.low_ram=true" "$OUT/system/build.prop" "$OUT/system/etc/prop.default" "$OUT/product/build.prop" 2>/dev/null
+          find "$OUT" -type f -path "*/priv-app/VerticeLauncher/VerticeLauncher.apk" -print -quit | grep -q .
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cp "$OUT/system.img" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}.img"
+          if [ -f "$OUT/vbmeta.img" ]; then cp "$OUT/vbmeta.img" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}-vbmeta.img"; fi
+          sha256sum "$GITHUB_WORKSPACE/dist/"* | tee "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt"
+
+      - name: Upload GSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vertice-gsi-${{ matrix.device }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  j2-core-compatibility:
+    name: Galaxy J2 Core — compatibility gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Produce explicit compatibility status
+        run: |
+          cat > J2_CORE_STATUS.md <<'EOF'
+          # Galaxy J2 Core compatibility status
+
+          Status: NOT A MODERN GSI BUILD TARGET.
+
+          The current VÉRTICE pipeline does not claim that a modern AOSP GSI
+          boots the Galaxy J2 Core. A separate legacy experiment requires the
+          exact SM-J260 variant and verified vendor/partition/Binder/Treble data.
+
+          No image is published from this job. This prevents an untested
+          historical target from being presented as a supported ROM.
+          EOF
+          cat J2_CORE_STATUS.md
+
+      - name: Upload compatibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vertice-j2-core-compatibility
+          path: J2_CORE_STATUS.md
+          retention-days: 14
