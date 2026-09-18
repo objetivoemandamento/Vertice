@@ -1,4 +1,4 @@
-name: Build VÉRTICE GSI — Android Go / Low-RAM
+name: Build VÉRTICE GSI — device-targeted profiles
 
 on:
   workflow_dispatch:
@@ -15,26 +15,28 @@ permissions:
   contents: read
 
 env:
-  AOSP_BRANCH: android-latest-release
   AOSP_JOBS: 8
 
 jobs:
   build-gsi:
-    name: ${{ matrix.name }} (${{ matrix.product }})
+    name: ${{ matrix.name }}
     runs-on: ${{ vars.VERTICE_AOSP_RUNNER || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Galaxy A04
+          - name: Galaxy A04 — Android 12 GSI ARM64
             device: galaxy-a04
-            product: aosp_arm64_ab
-          - name: Redmi 9A
+            branch: android12-gsi
+            product: vertice_a04
+            base_product: gsi_arm64
+            java: "11"
+          - name: Redmi 9A — Android 10 Legacy ARM32/Binder64
             device: redmi-9a
-            product: aosp_arm_64b_ab
-          - name: Galaxy J2 Core
-            device: j2-core
-            product: aosp_arm_64b_a
+            branch: android10-gsi
+            product: vertice_redmi9a
+            base_product: aosp_arm_64b_ab
+            java: "8"
 
     steps:
       - name: Checkout VÉRTICE
@@ -45,12 +47,6 @@ jobs:
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
           sudo docker system prune -af || true
           df -h
-
-      - name: Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
 
       - name: Install AOSP host dependencies
         run: |
@@ -64,25 +60,16 @@ jobs:
           chmod +x "$HOME/bin/repo"
           echo "$HOME/bin" >> "$GITHUB_PATH"
 
+      - name: Java 17 for VÉRTICE APK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Configure Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.10.2"
-
-      - name: Prepare launcher manifest for system HOME role
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("app/src/main/AndroidManifest.xml")
-          s = p.read_text()
-          marker = '<category android:name="android.intent.category.LAUNCHER" />'
-          extra = marker + '\n                <category android:name="android.intent.category.HOME" />\n                <category android:name="android.intent.category.DEFAULT" />'
-          if 'android.intent.category.HOME' not in s:
-              if marker not in s:
-                  raise SystemExit("Launcher activity marker not found")
-              s = s.replace(marker, extra, 1)
-              p.write_text(s)
-          PY
 
       - name: Build VÉRTICE APK
         run: |
@@ -90,52 +77,65 @@ jobs:
           test -s app/build/outputs/apk/release/app-release.apk
           sha256sum app/build/outputs/apk/release/app-release.apk
 
-      - name: Sync AOSP
+      - name: AOSP Java runtime
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Sync exact AOSP GSI branch
         run: |
           mkdir -p "$GITHUB_WORKSPACE/aosp"
           cd "$GITHUB_WORKSPACE/aosp"
-          repo init -u https://android.googlesource.com/platform/manifest -b "$AOSP_BRANCH" --depth=1
+          repo init -u https://android.googlesource.com/platform/manifest -b "${{ matrix.branch }}" --depth=1
           repo sync -c --no-tags --optimized-fetch --prune -j"$AOSP_JOBS"
 
-      - name: Inject VÉRTICE launcher integration
+      - name: Inject VÉRTICE without modifying upstream product files
         run: |
           cd "$GITHUB_WORKSPACE/aosp"
           mkdir -p device/vertice/gsi/prebuilt
           cp "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" device/vertice/gsi/prebuilt/VerticeLauncher.apk
           cp "$GITHUB_WORKSPACE/rom/gsi/Android.bp" device/vertice/gsi/Android.bp
+          cp "$GITHUB_WORKSPACE/rom/gsi/AndroidProducts.mk" device/vertice/gsi/AndroidProducts.mk
+          cp "$GITHUB_WORKSPACE/rom/gsi/vertice_gsi.mk" device/vertice/gsi/vertice_gsi.mk
+          if [ "${{ matrix.device }}" = "galaxy-a04" ]; then
+            cp "$GITHUB_WORKSPACE/rom/gsi/vertice_a04.mk" device/vertice/gsi/vertice_a04.mk
+          else
+            cp "$GITHUB_WORKSPACE/rom/gsi/vertice_redmi9a.mk" device/vertice/gsi/vertice_redmi9a.mk
+          fi
           cp "$GITHUB_WORKSPACE/rom/gsi/privapp-permissions-vertice.xml" device/vertice/gsi/privapp-permissions-vertice.xml
 
-      - name: Extend selected AOSP GSI product
+      - name: Verify base product exists
         run: |
           cd "$GITHUB_WORKSPACE/aosp"
-          PRODUCT_MK="build/make/target/product/${{ matrix.product }}.mk"
-          test -f "$PRODUCT_MK"
-          cat >> "$PRODUCT_MK" <<'EOF'
+          test -f "build/make/target/product/${{ matrix.base_product }}.mk"
 
-          # VÉRTICE launcher integration.
-          PRODUCT_PACKAGES += VerticeLauncher
-          PRODUCT_COPY_FILES += \
-              device/vertice/gsi/privapp-permissions-vertice.xml:system/etc/permissions/privapp-permissions-vertice.xml
-          PRODUCT_PRODUCT_PROPERTIES += \
-              ro.config.low_ram=true
-          EOF
+      - name: Configure VÉRTICE product
+        run: |
+          cd "$GITHUB_WORKSPACE/aosp"
+          source build/envsetup.sh
+          lunch "${{ matrix.product }}-userdebug"
 
-      - name: Build GSI system image
+      - name: Build system image
         run: |
           cd "$GITHUB_WORKSPACE/aosp"
           source build/envsetup.sh
           lunch "${{ matrix.product }}-userdebug"
           m -j"$AOSP_JOBS" systemimage
 
-      - name: Validate and publish image
+      - name: Validate VÉRTICE system image
         run: |
           set -euxo pipefail
           cd "$GITHUB_WORKSPACE/aosp"
-          SYSTEM_IMG="$(find out/target/product -maxdepth 3 -type f -name system.img | head -n1)"
-          test -n "$SYSTEM_IMG"
+          OUT="out/target/product/${{ matrix.product }}"
+          test -s "$OUT/system.img"
+          test -f "$OUT/vendor/build.prop"
+          grep -q "ro.config.low_ram=true" "$OUT/vendor/build.prop"
+          find "$OUT" -type f -path "*/priv-app/VerticeLauncher/VerticeLauncher.apk" -print -quit | grep -q .
           mkdir -p "$GITHUB_WORKSPACE/dist"
-          cp "$SYSTEM_IMG" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}.img"
-          sha256sum "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}.img" | tee "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt"
+          cp "$OUT/system.img" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}.img"
+          if [ -f "$OUT/vbmeta.img" ]; then cp "$OUT/vbmeta.img" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}-vbmeta.img"; fi
+          sha256sum "$GITHUB_WORKSPACE/dist/"* | tee "$GITHUB_WORKSPACE/dist/SHA256SUMS.txt"
 
       - name: Upload GSI artifact
         uses: actions/upload-artifact@v4
@@ -143,4 +143,31 @@ jobs:
           name: vertice-gsi-${{ matrix.device }}
           path: dist/
           if-no-files-found: error
+          retention-days: 14
+
+  j2-core-compatibility:
+    name: Galaxy J2 Core — compatibility gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Produce explicit compatibility status
+        run: |
+          cat > J2_CORE_STATUS.md <<'EOF'
+          # Galaxy J2 Core compatibility status
+
+          Status: NOT A MODERN GSI BUILD TARGET.
+
+          The current VÉRTICE pipeline does not claim that a modern AOSP GSI
+          boots the Galaxy J2 Core. A separate legacy experiment requires the
+          exact SM-J260 variant and verified vendor/partition/Binder/Treble data.
+
+          No image is published from this job. This prevents an untested
+          historical target from being presented as a supported ROM.
+          EOF
+          cat J2_CORE_STATUS.md
+
+      - name: Upload compatibility report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vertice-j2-core-compatibility
+          path: J2_CORE_STATUS.md
           retention-days: 14
