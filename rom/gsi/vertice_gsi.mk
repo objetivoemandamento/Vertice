@@ -6,12 +6,14 @@
 PRODUCT_PACKAGES += \
     VerticeLauncher
 
-# Android Go/low-RAM behavior is based on AOSP's Go defaults plus the
-# explicit low-RAM property. This is not a claim of Google Android Go
-# certification.
+# AOSP Go defaults provide the broader low-RAM tuning. This does not claim
+# Google Android Go certification.
 $(call inherit-product, $(SRC_TARGET_DIR)/product/go_defaults_common.mk)
 
-PRODUCT_VENDOR_PROPERTIES += \
+# Keep the VÉRTICE GSI's low-RAM property in the generic system image.
+# Do not place this only in PRODUCT_VENDOR_PROPERTIES because a GSI build
+# does not ship the OEM vendor image.
+PRODUCT_SYSTEM_PROPERTIES += \
     ro.config.low_ram=true
 
 PRODUCT_SYSTEM_SERVER_COMPILER_FILTER := speed-profile
