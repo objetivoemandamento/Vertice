@@ -16,6 +16,7 @@ permissions:
 
 env:
   AOSP_JOBS: 8
+  GRADLE_OPTS: "-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8"
 
 jobs:
   build-gsi:
