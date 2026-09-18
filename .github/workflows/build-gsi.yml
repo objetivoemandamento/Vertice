@@ -44,7 +44,6 @@ jobs:
 
       - name: Free runner disk
         run: |
-          # Keep /usr/local/lib/android: setup-android uses this runner-managed SDK location.
           sudo rm -rf /opt/ghc /usr/share/dotnet || true
           sudo docker system prune -af || true
           df -h
@@ -79,9 +78,14 @@ jobs:
 
       - name: Build VÉRTICE APK
         run: |
+          set -euxo pipefail
           gradle :app:assembleRelease --no-daemon --stacktrace
-          test -s app/build/outputs/apk/release/app-release.apk
-          sha256sum app/build/outputs/apk/release/app-release.apk
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          test -n "$APK"
+          test -s "$APK"
+          mkdir -p "$GITHUB_WORKSPACE/apk-dist"
+          cp "$APK" "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk"
+          sha256sum "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk"
 
       - name: AOSP Java runtime
         uses: actions/setup-java@v4
@@ -100,7 +104,7 @@ jobs:
         run: |
           cd "$GITHUB_WORKSPACE/aosp"
           mkdir -p device/vertice/gsi/prebuilt
-          cp "$GITHUB_WORKSPACE/app/build/outputs/apk/release/app-release.apk" device/vertice/gsi/prebuilt/VerticeLauncher.apk
+          cp "$GITHUB_WORKSPACE/apk-dist/VerticeLauncher.apk" device/vertice/gsi/prebuilt/VerticeLauncher.apk
           cp "$GITHUB_WORKSPACE/rom/gsi/Android.bp" device/vertice/gsi/Android.bp
           cp "$GITHUB_WORKSPACE/rom/gsi/AndroidProducts.mk" device/vertice/gsi/AndroidProducts.mk
           cp "$GITHUB_WORKSPACE/rom/gsi/vertice_gsi.mk" device/vertice/gsi/vertice_gsi.mk
