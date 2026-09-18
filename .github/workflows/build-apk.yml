@@ -1,4 +1,5 @@
 name: Build VERTEX APK
+# Build trigger/check: compile and verify the existing Android project.
 on:
   push:
     branches: [ main ]
