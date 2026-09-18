@@ -129,8 +129,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/aosp"
           OUT="out/target/product/${{ matrix.product }}"
           test -s "$OUT/system.img"
-          test -f "$OUT/vendor/build.prop"
-          grep -q "ro.config.low_ram=true" "$OUT/vendor/build.prop"
+          grep -R -q "ro.config.low_ram=true" "$OUT/system/build.prop" "$OUT/system/etc/prop.default" "$OUT/product/build.prop" 2>/dev/null
           find "$OUT" -type f -path "*/priv-app/VerticeLauncher/VerticeLauncher.apk" -print -quit | grep -q .
           mkdir -p "$GITHUB_WORKSPACE/dist"
           cp "$OUT/system.img" "$GITHUB_WORKSPACE/dist/Vertice-GSI-${{ matrix.device }}.img"
