@@ -3,6 +3,9 @@ android_app_import {
     apk: "prebuilt/VerticeLauncher.apk",
     certificate: "platform",
     privileged: true,
+    dex_preopt: {
+        enabled: true,
+    },
     overrides: [
         "Launcher3",
         "Launcher3QuickStep",
