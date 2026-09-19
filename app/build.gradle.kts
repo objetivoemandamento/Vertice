@@ -13,7 +13,7 @@ android {
         minSdk = 24
         targetSdk = 35
         versionCode = (System.getenv("VERTICE_BUILD_NUMBER") ?: "18").toInt()
-        versionName = "1.4.4"
+        versionName = "1.5.0"
         buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
     }
     buildFeatures { buildConfig = true }
