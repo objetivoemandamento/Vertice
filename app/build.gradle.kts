@@ -45,6 +45,8 @@ android {
             if (signingReady) signingConfig = signingConfigs.getByName("release")
         }
         debug {
+            applicationIdSuffix = ".teste"
+            versionNameSuffix = "-teste"
             buildConfigField("String", "VERTICE_API_URL", "\"https://vertice-backend-8gj5.onrender.com\"")
         }
     }
