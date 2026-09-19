@@ -184,3 +184,25 @@ create policy "commands own" on commands for all to authenticated using ((select
 create policy "analyses own" on analyses for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
 create policy "history own" on history for select to authenticated using ((select auth.uid()) = user_id);
 create policy "monthly sales own" on monthly_sales for all to authenticated using ((select auth.uid()) = user_id) with check ((select auth.uid()) = user_id);
+
+
+-- Production additions: AI history and refresh-token rotation
+create table if not exists ai_conversations (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  mode text not null check (mode in ('comando','operacao','monitoramento')),
+  role text not null check (role in ('user','assistant')),
+  content text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_ai_conversations_user_created on ai_conversations(user_id, created_at desc);
+
+create table if not exists refresh_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  revoked_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_refresh_tokens_user on refresh_tokens(user_id, expires_at desc);
