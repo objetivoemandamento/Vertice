@@ -1,4 +1,4 @@
-name: Build VERTEX APK
+name: Build VÉRTICE APK
 # Build trigger/check: compile and verify the existing Android project.
 on:
   push:
@@ -69,7 +69,7 @@ jobs:
           TAG="android-${GITHUB_RUN_NUMBER}"
           gh release create "$TAG" "${APK_PATH}" --title "VÉRTICE ${GITHUB_RUN_NUMBER}" --notes "Build automático do VÉRTICE. Assinatura estável: true."
           APK_URL="https://github.com/objetivoemandamento/Vertice/releases/download/${TAG}/${APK_NAME}"
-          printf '{"versionCode":%s,"versionName":"1.4.4","apkUrl":"%s","notes":"Atualização automática do VÉRTICE.","signed":true}\n' "$GITHUB_RUN_NUMBER" "$APK_URL" > update.json
+          printf '{"versionCode":%s,"versionName":"1.5.0","apkUrl":"%s","notes":"Atualização automática do VÉRTICE.","signed":true}\n' "$GITHUB_RUN_NUMBER" "$APK_URL" > update.json
           CONTENT=$(base64 -w 0 update.json)
           SHA=$(gh api "repos/${GITHUB_REPOSITORY}/contents/update.json" --jq '.sha')
           gh api -X PUT "repos/${GITHUB_REPOSITORY}/contents/update.json" \
@@ -79,11 +79,11 @@ jobs:
             -f branch='main'
       - uses: actions/upload-artifact@v4
         with:
-          name: VERTEX-v1.4.4-teste-apk
+          name: VERTEX-v1.5.0-teste-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
-          name: VERTEX-v1.4.4-definitivo-apk
+          name: VERTEX-v1.5.0-definitivo-apk
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
