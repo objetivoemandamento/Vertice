@@ -342,7 +342,7 @@ app.post('/public/signup/checkout',async(req,res)=>{
     const ref=externalReference(u.id,payment.id);
     await query('update payments set external_reference=$1 where id=$2',[ref,payment.id]);
     if(market.countryCode==='BR'||market.countryCode==='MX'){
-      const order=await mercadoPago('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':String(payment.id)},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:ref,processing_mode:'manual',items:[{title:'VÉRTICE — '+selected.name,description:selected.description,quantity:1,unit_price:amount.toFixed(2)}])});
+      const order=await mercadoPago('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':String(payment.id)},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:ref,processing_mode:'manual',items:[{title:'VÉRTICE — '+selected.name,description:selected.description,quantity:1,unit_price:amount.toFixed(2)}]})});
       const orderId=String(order.id||''),checkoutUrl=String(order.checkout_url||'');if(!orderId||!checkoutUrl)throw new Error('Mercado Pago não retornou checkout.');
       await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[orderId,checkoutUrl,payment.id]);
       return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:market.currencyCode,checkoutUrl});
