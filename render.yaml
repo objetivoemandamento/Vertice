@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: vertice-backend
+    runtime: node
+    region: oregon
+    plan: free
+    branch: main
+    autoDeploy: true
+    buildCommand: cd server && npm ci
+    startCommand: cd server && npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: OWNER_LOGIN
+        sync: false
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: MERCADOPAGO_ACCESS_TOKEN
+        sync: false
+      - key: MERCADOPAGO_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: VERTICE_AI_API_KEY
+        sync: false
+      - key: VERTICE_AI_MODEL
+        value: llama-3.3-70b-versatile
+      - key: VERTICE_PLANS_JSON
+        value: '[{"id":"basic","name":"Básico","price":99.90,"description":"Acesso ao VÉRTICE para operação individual."},{"id":"pro","name":"Profissional","price":199.90,"description":"Recursos ampliados para operação profissional."},{"id":"business","name":"Empresarial","price":499.90,"description":"Estrutura para uso empresarial."}]'
+      - key: PUBLIC_APP_SUCCESS_URL
+        value: https://vertice-backend-8gj5.onrender.com/payment/success
+      - key: PUBLIC_APP_CANCEL_URL
+        value: https://vertice-backend-8gj5.onrender.com/payment/cancel
