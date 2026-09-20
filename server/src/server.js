@@ -100,6 +100,21 @@ function ownerOnly(req, res, next) {
   if (req.user?.role !== 'OWNER') return errorJson(res, 403, 'Acesso de proprietário necessário.');
   next();
 }
+const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
+
+async function ensureOwnerIdentity() {
+  const existing = (await query('select id from users where email=$1', [OWNER_SYSTEM_EMAIL])).rows[0];
+  if (existing?.id) {
+    const sub = await query('select id from subscriptions where user_id=$1 and status=\'active\' limit 1', [existing.id]);
+    if (!sub.rows[0]) await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [existing.id]);
+    return existing.id;
+  }
+  const passwordHash = await bcrypt.hash(OWNER_PASSWORD || crypto.randomUUID(), 10);
+  const created = (await query('insert into users(email,password_hash,full_name,country_code,locale) values($1,$2,$3,\'BR\',\'pt-BR\') returning id', [OWNER_SYSTEM_EMAIL,passwordHash,'VÉRTICE Owner'])).rows[0];
+  await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [created.id]);
+  return created.id;
+}
+
 async function currentSubscription(userId) {
   const r = await query('select * from subscriptions where user_id=$1 order by updated_at desc limit 1', [userId]);
   return r.rows[0] || null;
@@ -108,7 +123,7 @@ async function activeSubscription(userId) {
   const s = await currentSubscription(userId);
   return Boolean(s && s.status === 'active' && (!s.current_period_end || new Date(s.current_period_end) >= now()));
 }
-function userId(req) { return req.user.role === 'OWNER' ? null : req.user.sub; }
+function userId(req) { return req.user.sub; }
 function externalReference(userIdValue, paymentId) {
   return 'VTX-' + String(userIdValue).replace(/-/g, '').toLowerCase() + '-' + String(paymentId).replace(/-/g, '').toLowerCase();
 }
@@ -265,8 +280,9 @@ app.post('/auth/login', async (req, res) => {
   const login = String(req.body?.login || req.body?.email || '').trim().toLowerCase();
   const password = String(req.body?.password || '');
   if (OWNER_LOGIN && login === OWNER_LOGIN.toLowerCase() && OWNER_PASSWORD && password === OWNER_PASSWORD) {
-    const token = signAccess({ sub: 'owner', email: OWNER_LOGIN, role: 'OWNER' });
-    return res.json({ token, refreshToken: await issueRefreshToken('owner', 'OWNER'), role: 'OWNER', customer: { id: 'owner', email: OWNER_LOGIN } });
+    const ownerId = await ensureOwnerIdentity();
+    const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' });
+    return res.json({ token, refreshToken: await issueRefreshToken(ownerId, 'OWNER'), role: 'OWNER', customer: { id: ownerId, email: OWNER_LOGIN } });
   }
   try {
     const r = await query('select id,email,password_hash,country_code,locale from users where email=$1', [login]);
@@ -284,7 +300,7 @@ app.post('/auth/refresh', async (req, res) => {
   try {
     const payload = verifyRefresh(token);
     if (payload.type !== 'refresh') throw new Error('invalid');
-    if (payload.role === 'OWNER') return res.json({ token: signAccess({ sub: 'owner', email: OWNER_LOGIN, role: 'OWNER' }), refreshToken: token, role: 'OWNER' });
+    if (payload.role === 'OWNER') { const ownerId = await ensureOwnerIdentity(); return res.json({ token: signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' }), refreshToken: token, role: 'OWNER' }); }
     const found = await query('select user_id from refresh_tokens where token_hash=$1 and revoked_at is null and expires_at>now()', [hashToken(token)]);
     if (!found.rows[0]) return errorJson(res, 401, 'Refresh token inválido ou revogado.');
     await query('update refresh_tokens set revoked_at=now() where token_hash=$1', [hashToken(token)]);
@@ -296,7 +312,7 @@ app.post('/auth/refresh', async (req, res) => {
 });
 
 app.get('/me', auth, async (req, res) => {
-  if (req.user.role === 'OWNER') return res.json({ role: 'OWNER', customer: { id: 'owner', email: req.user.email }, subscription: { plan: 'owner', status: 'active', currentPeriodEnd: null } });
+  if (req.user.role === 'OWNER') return res.json({ role: 'OWNER', customer: { id: req.user.sub, email: req.user.email }, subscription: { plan: 'owner', status: 'active', currentPeriodEnd: null } });
   const u = (await query('select id,email,country_code,locale from users where id=$1', [req.user.sub])).rows[0];
   if (!u) return errorJson(res, 404, 'Usuário não encontrado.');
   const s = await currentSubscription(u.id);
@@ -304,7 +320,6 @@ app.get('/me', auth, async (req, res) => {
 });
 
 app.post('/devices/register', auth, async (req, res) => {
-  if (req.user.role !== 'CUSTOMER') return errorJson(res, 403, 'Use o terminal do proprietário.');
   const id = String(req.body?.deviceId || '').trim();
   const mode = String(req.body?.mode || '').trim();
   const name = String(req.body?.deviceName || '').trim().slice(0,100);
