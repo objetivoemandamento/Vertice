@@ -344,6 +344,7 @@ app.post('/public/signup/checkout',async(req,res)=>{
   const market=normalizeMarket(req.body?.countryCode,req.body?.locale,req.body?.currencyCode);const selected=plans().find(p=>p.id===planId);
   if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)||password.length<8||!selected||!market)return errorJson(res,400,'E-mail, senha, plano ou mercado inválido.');
   const amount=money(req.body?.amount ?? selected.price);if(!Number.isFinite(amount)||amount<=0)return errorJson(res,400,'Valor inválido.');
+  const currencyCode=String(market.currencyCode||market.currency||'BRL').toUpperCase();
   try{
     const hash=await bcrypt.hash(password,12);
     const u=await withTransaction(async client=>{
@@ -355,16 +356,16 @@ app.post('/public/signup/checkout',async(req,res)=>{
       else await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,\'pending\')',[found.id,selected.id]);
       return found;
     });
-    const payment=(await query('insert into payments(user_id,provider,external_reference,amount,currency_code,status) values($1,$2,$3,$4,$5,\'pending\') returning id',[u.id,market.countryCode==='BR'||market.countryCode==='MX'?'mercado_pago':'stripe',null,amount,market.currencyCode])).rows[0];
+    const payment=(await query('insert into payments(user_id,provider,external_reference,amount,currency_code,status) values($1,$2,$3,$4,$5,\'pending\') returning id',[u.id,market.countryCode==='BR'||market.countryCode==='MX'?'mercado_pago':'stripe',null,amount,currencyCode])).rows[0];
     const ref=externalReference(u.id,payment.id);
     await query('update payments set external_reference=$1 where id=$2',[ref,payment.id]);
     if(market.countryCode==='BR'||market.countryCode==='MX'){
       const order=await mercadoPago('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':String(payment.id)},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:ref,processing_mode:'manual',items:[{title:'VÉRTICE — '+selected.name,description:selected.description,quantity:1,unit_price:amount.toFixed(2)}]})});
       const orderId=String(order.id||''),checkoutUrl=String(order.checkout_url||'');if(!orderId||!checkoutUrl)throw new Error('Mercado Pago não retornou checkout.');
       await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[orderId,checkoutUrl,payment.id]);
-      return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:market.currencyCode,checkoutUrl});
+      return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:currencyCode,checkoutUrl});
     }
-    const params=stripeForm({'mode':'payment','success_url':String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),'cancel_url':String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel'),'line_items[0][price_data][currency]':market.currencyCode.toLowerCase(),'line_items[0][price_data][product_data][name]':'VÉRTICE — '+selected.name,'line_items[0][price_data][unit_amount]':String(Math.round(amount*100)),'line_items[0][quantity]':'1','metadata[payment_id]':String(payment.id),'metadata[external_reference]':ref});
+    const params=stripeForm({'mode':'payment','success_url':String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),'cancel_url':String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel'),'line_items[0][price_data][currency]':currencyCode.toLowerCase(),'line_items[0][price_data][product_data][name]':'VÉRTICE — '+selected.name,'line_items[0][price_data][unit_amount]':String(Math.round(amount*100)),'line_items[0][quantity]':'1','metadata[payment_id]':String(payment.id),'metadata[external_reference]':ref});
     const session=await stripe('/v1/checkout/sessions',{method:'POST',body:params});
     await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[String(session.id),String(session.url||''),payment.id]);
     return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:market.currencyCode,checkoutUrl:session.url});
