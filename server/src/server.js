@@ -327,6 +327,15 @@ app.post('/devices/register', auth, async (req, res) => {
   await query('insert into devices(id,user_id,device_name,mode,last_seen_at) values($1,$2,$3,$4,now()) on conflict(id) do update set user_id=excluded.user_id,device_name=excluded.device_name,mode=excluded.mode,last_seen_at=now()', [id, req.user.sub, name, mode]);
   res.json({ ok:true, deviceId:id, mode });
 });
+app.post('/owner/devices/register', auth, ownerOnly, async (req, res) => {
+  const id = String(req.body?.deviceId || '').trim();
+  const mode = String(req.body?.mode || '').trim();
+  const name = String(req.body?.deviceName || '').trim().slice(0,100);
+  if (!id || !['comando','operacao','monitoramento'].includes(mode)) return errorJson(res, 400, 'deviceId e mode são obrigatórios.');
+  await query('insert into devices(id,user_id,device_name,mode,last_seen_at) values($1,$2,$3,$4,now()) on conflict(id) do update set user_id=excluded.user_id,device_name=excluded.device_name,mode=excluded.mode,last_seen_at=now()', [id, req.user.sub, name, mode]);
+  res.json({ ok:true, deviceId:id, mode });
+});
+
 app.get('/devices', auth, async (req, res) => {
   const cid = userId(req);
   if (!cid) return res.json({ devices: [] });
@@ -344,6 +353,16 @@ app.post('/commands', auth, async (req,res) => {
   const r=await query('insert into commands(user_id,device_id,mode,command,status) values($1,$2,$3,$4,\'queued\') returning id,status',[req.user.sub,deviceId,mode,command]);
   res.status(202).json({id:r.rows[0].id,status:r.rows[0].status,message:'Comando recebido pelo VÉRTICE.'});
 });
+app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
+  if (!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
+  const command=String(req.body?.command||'').trim(), mode=String(req.body?.mode||''), deviceId=String(req.body?.deviceId||'').trim();
+  if(!command||command.length>2000||!['comando','operacao','monitoramento'].includes(mode)||!deviceId)return errorJson(res,400,'Comando, modo ou deviceId inválido.');
+  const d=(await query('select user_id,mode from devices where id=$1',[deviceId])).rows[0];
+  if(!d||d.user_id!==req.user.sub)return errorJson(res,403,'Dispositivo não pertence à conta.');
+  const r=await query('insert into commands(user_id,device_id,mode,command,status) values($1,$2,$3,$4,\'queued\') returning id,status',[req.user.sub,deviceId,mode,command]);
+  res.status(202).json({id:r.rows[0].id,status:r.rows[0].status,message:'Comando recebido pelo VÉRTICE.'});
+});
+
 app.get('/commands',auth,async(req,res)=>{const cid=userId(req);if(!cid)return res.json({commands:[]});const rows=(await query('select id,device_id as "deviceId",mode,command,status,created_at as "createdAt" from commands where user_id=$1 order by created_at desc limit 50',[cid])).rows;res.json({commands:rows});});
 app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1',[deviceId])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');await query('update devices set last_seen_at=now() where id=$1',[deviceId]);const r=await query('update commands set status=\'running\',updated_at=now() where id=(select id from commands where user_id=$1 and device_id=$2 and mode=\'operacao\' and status=\'queued\' order by created_at asc for update skip locked limit 1) returning id,command,mode,status',[req.user.sub,deviceId]);res.json({ok:true,command:r.rows[0]||null});});
 app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const r=await query('update commands set status=$1,updated_at=now() where id=$2 and user_id=$3 and device_id=$4 and status=\'running\' returning status',[status,id,req.user.sub,deviceId]);if(!r.rows[0])return errorJson(res,404,'Comando não encontrado.');res.json({ok:true,status:r.rows[0].status});});
