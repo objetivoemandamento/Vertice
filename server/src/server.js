@@ -10,6 +10,23 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
+app.get('/download/vertice.apk', async (req, res) => {
+  const apkUrl = 'https://github.com/objetivoemandamento/Vertice/releases/download/android-149/app-release.apk';
+  try {
+    const response = await fetch(apkUrl, { redirect: 'follow' });
+    if (!response.ok || !response.body) return errorJson(res, 502, 'APK indisponível no momento.');
+    res.status(200);
+    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+    res.setHeader('Content-Disposition', 'attachment; filename="vertice-1.5.0.apk"');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    const { Readable } = require('stream');
+    Readable.fromWeb(response.body).pipe(res);
+  } catch (e) {
+    return errorJson(res, 502, 'Não foi possível disponibilizar o APK.');
+  }
+});
+
+
 const PORT = Number(process.env.PORT || 8080);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = String(process.env.JWT_SECRET || '').trim();
