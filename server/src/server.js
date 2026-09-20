@@ -144,7 +144,8 @@ async function providerFetch(base, path, options = {}, timeoutMs = 15000) {
     let data = {};
     try { data = raw ? JSON.parse(raw) : {}; } catch {}
     if (!response.ok) {
-      const e = new Error(data?.message || data?.error || ('HTTP ' + response.status));
+      const detail = data?.message || data?.error || data?.cause?.[0]?.description || data?.cause?.[0]?.code || ('HTTP ' + response.status);
+      const e = new Error(String(detail));
       e.status = response.status;
       e.provider = data;
       throw e;
@@ -175,15 +176,14 @@ async function updatePaymentByProvider(provider, providerPaymentId, status, paid
   await query('update payments set status=$1, paid_at=case when $2 is not null then coalesce(paid_at,$2) else paid_at end, updated_at=now() where provider=$3 and (provider_payment_id=$4 or provider_order_id=$4)', [status, paidAt, provider, providerPaymentId]);
 }
 async function syncMercadoPagoPayment(paymentId) {
-  const order = await mercadoPago('/v1/orders/' + encodeURIComponent(paymentId));
-  const payments = Array.isArray(order?.transactions?.payments) ? order.transactions.payments : [];
-  const approved = payments.find(p => ['approved','processed','accredited'].includes(String(p?.status || '').toLowerCase()));
-  const status = (String(order?.status || '').toLowerCase() === 'processed' && Number(order?.total_paid_amount || 0) > 0) || approved ? 'paid' :
-    ['cancelled','canceled'].includes(String(order?.status || '').toLowerCase()) ? 'cancelled' :
-    String(order?.status || '').toLowerCase() === 'expired' ? 'expired' : 'pending';
-  await query('update payments set status=$1, provider_payment_id=coalesce($2,provider_payment_id), paid_at=case when $1=\'paid\' then coalesce(paid_at,now()) else paid_at end, updated_at=now() where provider=\'mercado_pago\' and provider_order_id=$3',
-    [status, approved?.id ? String(approved.id) : null, String(paymentId)]);
-  return { status, order };
+  const payment = await mercadoPago('/v1/payments/' + encodeURIComponent(paymentId));
+  const rawStatus = String(payment?.status || '').toLowerCase();
+  const status = rawStatus === 'approved' ? 'paid' :
+    ['cancelled','canceled'].includes(rawStatus) ? 'cancelled' :
+    ['rejected','refunded','charged_back'].includes(rawStatus) ? 'failed' : 'pending';
+  await query('update payments set status=$1, provider_payment_id=coalesce($2,provider_payment_id), paid_at=case when $1=\'paid\' then coalesce(paid_at,now()) else paid_at end, updated_at=now() where provider=\'mercado_pago\' and (provider_order_id=$3 or provider_payment_id=$3)',
+    [status, String(payment?.id || paymentId), String(paymentId)]);
+  return { status, payment };
 }
 
 app.post('/webhooks/stripe', express.raw({ type: 'application/json', limit: '2mb' }), async (req, res) => {
@@ -360,16 +360,28 @@ app.post('/public/signup/checkout',async(req,res)=>{
     const ref=externalReference(u.id,payment.id);
     await query('update payments set external_reference=$1 where id=$2',[ref,payment.id]);
     if(market.countryCode==='BR'||market.countryCode==='MX'){
-      const order=await mercadoPago('/v1/orders',{method:'POST',headers:{'X-Idempotency-Key':String(payment.id)},body:JSON.stringify({type:'online',total_amount:amount.toFixed(2),external_reference:ref,processing_mode:'manual',items:[{title:'VÉRTICE — '+selected.name,description:selected.description,quantity:1,unit_price:amount.toFixed(2)}]})});
-      const orderId=String(order.id||''),checkoutUrl=String(order.checkout_url||'');if(!orderId||!checkoutUrl)throw new Error('Mercado Pago não retornou checkout.');
-      await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[orderId,checkoutUrl,payment.id]);
+      const preference=await mercadoPago('/checkout/preferences',{method:'POST',headers:{'X-Idempotency-Key':String(payment.id)},body:JSON.stringify({
+        items:[{id:String(selected.id),title:'VÉRTICE — '+selected.name,description:selected.description,quantity:1,currency_id:currencyCode,unit_price:amount}],
+        payer:{email},
+        external_reference:ref,
+        back_urls:{
+          success:String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),
+          pending:String(process.env.PUBLIC_APP_PENDING_URL||process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/pending'),
+          failure:String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel')
+        },
+        auto_return:'approved',
+        notification_url:String(process.env.MERCADOPAGO_WEBHOOK_URL||'https://vertice-backend-8gj5.onrender.com/webhooks/mercadopago')
+      })});
+      const preferenceId=String(preference.id||''),checkoutUrl=String(preference.init_point||preference.sandbox_init_point||'');
+      if(!preferenceId||!checkoutUrl)throw new Error('Mercado Pago não retornou a URL de checkout.');
+      await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[preferenceId,checkoutUrl,payment.id]);
       return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:currencyCode,checkoutUrl});
     }
     const params=stripeForm({'mode':'payment','success_url':String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),'cancel_url':String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel'),'line_items[0][price_data][currency]':currencyCode.toLowerCase(),'line_items[0][price_data][product_data][name]':'VÉRTICE — '+selected.name,'line_items[0][price_data][unit_amount]':String(Math.round(amount*100)),'line_items[0][quantity]':'1','metadata[payment_id]':String(payment.id),'metadata[external_reference]':ref});
     const session=await stripe('/v1/checkout/sessions',{method:'POST',body:params});
     await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[String(session.id),String(session.url||''),payment.id]);
     return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url});
-  }catch(e){console.error('[checkout]',e.message);return errorJson(res,e.status&&e.status<500?e.status:502,e.message||'Falha ao iniciar cobrança.');}
+  }catch(e){console.error('[checkout]',e.message, e.provider ? JSON.stringify(e.provider).slice(0,1200) : '');return errorJson(res,e.status&&e.status<500?e.status:502,e.message||'Falha ao iniciar cobrança.');}
 });
 
 app.get('/public/payment/status',async(req,res)=>{const id=String(req.query?.paymentId||'').trim();if(!id)return errorJson(res,400,'paymentId obrigatório.');const p=(await query('select * from payments where id=$1',[id])).rows[0];if(!p)return errorJson(res,404,'Pagamento não encontrado.');try{if(p.provider==='mercado_pago'&&p.provider_order_id)await syncMercadoPagoPayment(p.provider_order_id);const fresh=(await query('select status,currency_code,amount,checkout_url from payments where id=$1',[id])).rows[0];if(fresh?.status==='paid')await query('update subscriptions set status=\'active\',current_period_start=coalesce(current_period_start,now()),current_period_end=now()+interval \'1 month\',updated_at=now() where user_id=$1 and status in (\'pending\',\'active\')',[p.user_id]);res.json({paymentId:id,...fresh});}catch(e){return errorJson(res,502,e.message||'Falha ao verificar pagamento.');}});
