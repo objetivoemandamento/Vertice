@@ -166,18 +166,28 @@ create index if not exists idx_all_tenant_sales on monthly_sales(tenant_id);
 create index if not exists idx_all_tenant_ai on ai_conversations(tenant_id);
 create index if not exists idx_all_tenant_refresh on refresh_tokens(tenant_id);
 
-create or replace function enforce_user_tenant() returns trigger language plpgsql security definer set search_path=public as $
+create or replace function enforce_user_tenant() returns trigger language plpgsql security definer set search_path=public as $$
 declare resolved uuid;
 begin
-  select tenant_id into resolved from tenant_users where user_id=coalesce(new.user_id,new.owner_user_id) order by created_at asc limit 1;
+  select tenant_id into resolved from tenant_users where user_id=new.user_id order by created_at asc limit 1;
   if resolved is null then raise exception 'TENANT_NOT_FOUND_FOR_USER'; end if;
   if new.tenant_id is not null and new.tenant_id <> resolved then raise exception 'TENANT_MISMATCH'; end if;
   new.tenant_id := resolved;
   return new;
-end $;
+end $$;
+
+create or replace function enforce_owner_tenant() returns trigger language plpgsql security definer set search_path=public as $$
+declare resolved uuid;
+begin
+  select tenant_id into resolved from tenant_users where user_id=new.owner_user_id order by created_at asc limit 1;
+  if resolved is null then raise exception 'TENANT_NOT_FOUND_FOR_USER'; end if;
+  if new.tenant_id is not null and new.tenant_id <> resolved then raise exception 'TENANT_MISMATCH'; end if;
+  new.tenant_id := resolved;
+  return new;
+end $$;
 
 drop trigger if exists trg_companies_tenant on companies;
-create trigger trg_companies_tenant before insert or update of owner_user_id,tenant_id on companies for each row execute function enforce_user_tenant();
+create trigger trg_companies_tenant before insert or update of owner_user_id,tenant_id on companies for each row execute function enforce_owner_tenant();
 drop trigger if exists trg_subscriptions_tenant on subscriptions;
 create trigger trg_subscriptions_tenant before insert or update of user_id,tenant_id on subscriptions for each row execute function enforce_user_tenant();
 drop trigger if exists trg_payments_tenant on payments;
