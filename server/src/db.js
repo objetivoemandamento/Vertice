@@ -5,12 +5,13 @@ const databaseUrl = String(process.env.DATABASE_URL || '').trim();
 if (!databaseUrl) throw new Error('DATABASE_URL é obrigatório para o backend VÉRTICE.');
 
 const tenantStorage = new AsyncLocalStorage();
-const isLocal = /localhost|127\\.0.0.1/.test(databaseUrl);
-const rejectUnauthorized = String(process.env.DB_SSL_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false';
+const sslMode = String(process.env.DB_SSL_MODE || 'verify-full').toLowerCase();
+if (!['disable','require','verify-full'].includes(sslMode)) throw new Error('DB_SSL_MODE inválido. Use disable, require ou verify-full.');
+const ssl = sslMode === 'disable' ? false : { rejectUnauthorized: sslMode === 'verify-full' };
 
 const pool = new Pool({
   connectionString: databaseUrl,
-  ssl: isLocal ? false : { rejectUnauthorized },
+  ssl,
   max: Number(process.env.DB_POOL_MAX || 10),
   idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
   connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000),
