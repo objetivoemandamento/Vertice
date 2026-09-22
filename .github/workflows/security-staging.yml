@@ -17,10 +17,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: {node-version: "22", cache: "npm", cache-dependency-path: server/package-lock.json}
-      - run: npm ci
+      - run: npm install --no-audit --no-fund
       - run: npm run check
       - run: npm run typecheck
-      - run: npx eslint . --max-warnings=0 || true
+      - run: npx --yes eslint . --max-warnings=0 || true
+      - run: npm run test:concurrency
       - run: npm audit --audit-level=high
       - uses: aquasecurity/trivy-action@0.28.0
         with: {scan-type: fs, scan-ref: ".", severity: "HIGH,CRITICAL", exit-code: "1"}
