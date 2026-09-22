@@ -15,8 +15,11 @@ export async function executeThroughConnector(raw:unknown):Promise<unknown>{
      const existing=await client.query("select status,response from connector_executions where tenant_id=$1 and idempotency_key=$2 for update",[intent.tenantId,intent.idempotencyKey]);
      if(existing.rows[0]?.status==="completed")return {state:"completed",response:existing.rows[0].response};
      if(existing.rows[0]?.status==="running")return {state:"running"};
-     await client.query("insert into connector_executions(tenant_id,idempotency_key,connector,status,created_at,updated_at) values($1,$2,$3,'running',now(),now()) on conflict(tenant_id,idempotency_key) do update set status='running',updated_at=now()",[intent.tenantId,intent.idempotencyKey,connector.name]);
-     return {state:"claimed"};
+     const inserted=await client.query("insert into connector_executions(tenant_id,idempotency_key,connector,status,created_at,updated_at) values($1,$2,$3,'running',now(),now()) on conflict(tenant_id,idempotency_key) do nothing returning id",[intent.tenantId,intent.idempotencyKey,connector.name]);
+     if(inserted.rowCount===1)return {state:"claimed"};
+     const race=await client.query("select status,response from connector_executions where tenant_id=$1 and idempotency_key=$2 for update",[intent.tenantId,intent.idempotencyKey]);
+     if(race.rows[0]?.status==="completed")return {state:"completed",response:race.rows[0].response};
+     return {state:"running"};
    });
    if(claimed.state==="completed")return claimed.response;
    if(claimed.state==="running")throw new Error("IDEMPOTENT_EXECUTION_IN_PROGRESS");
