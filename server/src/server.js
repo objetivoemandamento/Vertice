@@ -226,37 +226,28 @@ async function syncMercadoPagoPayment(paymentId) {
 }
 
 app.post('/webhooks/stripe', express.raw({ type: 'application/json', limit: '2mb' }), async (req, res) => {
-  const secret = String(process.env.STRIPE_WEBHOOK_SECRET || '');
-  if (!secret) return errorJson(res, 503, 'Stripe webhook não configurado.');
-  const signature = String(req.headers['stripe-signature'] || '');
-  if (!signature) return errorJson(res, 400, 'Assinatura Stripe ausente.');
-  // Signature verification is performed without a Stripe SDK to keep the backend lean.
-  // The endpoint accepts only events whose timestamped HMAC matches STRIPE_WEBHOOK_SECRET.
-  const parts = Object.fromEntries(signature.split(',').map(x => x.split('=')));
-  const timestamp = Number(parts.t);
-  const provided = String(parts.v1 || '');
-  if (!Number.isFinite(timestamp) || !provided || Math.abs(Date.now()/1000 - timestamp) > 300) return errorJson(res, 400, 'Assinatura Stripe expirada.');
-  const payload = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
-  const signed = timestamp + '.' + payload;
-  const expected = crypto.createHmac('sha256', secret).update(signed).digest('hex');
-  if (expected.length !== provided.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(provided))) return errorJson(res, 400, 'Assinatura Stripe inválida.');
-  try {
-    const event = JSON.parse(payload);
-    const eventId=String(event.id||'');
-    if(!eventId)return errorJson(res,400,'Evento Stripe sem identificador.');
+  const secret=String(process.env.STRIPE_WEBHOOK_SECRET||'');if(!secret)return errorJson(res,503,'Stripe webhook não configurado.');
+  const signature=String(req.headers['stripe-signature']||'');if(!signature)return errorJson(res,400,'Assinatura Stripe ausente.');
+  const parts=Object.fromEntries(signature.split(',').map(x=>x.split('='))),timestamp=Number(parts.t),provided=String(parts.v1||'');
+  if(!Number.isFinite(timestamp)||!provided||Math.abs(Date.now()/1000-timestamp)>300)return errorJson(res,400,'Assinatura Stripe expirada.');
+  const payload=Buffer.isBuffer(req.body)?req.body.toString('utf8'):'';const expected=crypto.createHmac('sha256',secret).update(timestamp+'.'+payload).digest('hex');
+  if(expected.length!==provided.length||!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(provided)))return errorJson(res,400,'Assinatura Stripe inválida.');
+  try{
+    const event=JSON.parse(payload),eventId=String(event.id||''),object=event.data?.object||{},providerId=String(object.payment_intent||object.id||'');
+    if(!eventId||!providerId)return res.json({received:true});
     const tenantId=(await query('select app_tenant_for_payment($1,$2) as tenant_id',['stripe',providerId])).rows[0]?.tenant_id;
-    if(tenantId){return await runWithTenantContext({tenantId:String(tenantId),userId:String((await query('select user_id from payments where tenant_id=$1 and provider=\'stripe\' and (provider_payment_id=$2 or provider_order_id=$2) limit 1',[tenantId,providerId])).rows[0]?.user_id||''),role:'SYSTEM',requestId:crypto.randomUUID()},async()=>{const dedupe=await query("insert into webhook_events(provider,event_id,payload,received_at) values('stripe',$1,$2,now()) on conflict(provider,event_id) do nothing returning id",[eventId,JSON.stringify(event)]);
-    if(dedupe.rowCount===0)return res.json({received:true,deduplicated:true});
-    const object = event.data?.object || {};
-    const providerId = String(object.payment_intent || object.id || '');
-    const eventType = String(event.type || '');
-    let status = null;
-    if (/succeeded|paid|completed/.test(eventType)) status = 'paid';
-    else if (/failed|canceled|cancelled/.test(eventType)) status = eventType.includes('cancel') ? 'cancelled' : 'failed';
-    if (providerId && status) await updatePaymentByProvider('stripe', providerId, status, status === 'paid' ? new Date() : null);
-    return res.json({ received: true });});}
-    return res.json({received:true});
-  } catch (e) { return errorJson(res, 400, 'Webhook Stripe inválido.'); }
+    if(!tenantId)return res.json({received:true});
+    const userId=(await query('select user_id from payments where tenant_id=$1 and provider=\'stripe\' and (provider_payment_id=$2 or provider_order_id=$2) limit 1',[tenantId,providerId])).rows[0]?.user_id;
+    if(!userId)return res.json({received:true});
+    return await runWithTenantContext({tenantId:String(tenantId),userId:String(userId),role:'SYSTEM',requestId:crypto.randomUUID()},async()=>{
+      const dedupe=await query("insert into webhook_events(provider,event_id,payload,received_at) values('stripe',$1,$2,now()) on conflict(provider,event_id) do nothing returning id",[eventId,JSON.stringify(event)]);
+      if(dedupe.rowCount===0)return res.json({received:true,deduplicated:true});
+      const eventType=String(event.type||'');let status=null;
+      if(/succeeded|paid|completed/.test(eventType))status='paid';else if(/failed|canceled|cancelled/.test(eventType))status=eventType.includes('cancel')?'cancelled':'failed';
+      if(status)await updatePaymentByProvider('stripe',providerId,status,status==='paid'?new Date():null);
+      return res.json({received:true});
+    });
+  }catch{return errorJson(res,400,'Webhook Stripe inválido.');}
 });
 
 app.use(cors(buildCorsOptions()));
