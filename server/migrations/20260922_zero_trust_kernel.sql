@@ -168,10 +168,6 @@ create table if not exists connector_executions (
 );
 create index if not exists idx_connector_exec_tenant on connector_executions(tenant_id,created_at desc);
 alter table connector_executions enable row level security;
-drop policy if exists vertice_tenant_isolation on connector_executions;
-create policy vertice_tenant_isolation on connector_executions for all to public
-using (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
-with check (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
 
 create index if not exists idx_all_tenant_companies on companies(tenant_id);
 create index if not exists idx_all_tenant_subscriptions on subscriptions(tenant_id);
@@ -268,7 +264,7 @@ using (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
 with check (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
 
 do $$ declare t text; begin
-  foreach t in array array['companies','subscriptions','payments','devices','commands','analyses','history','monthly_sales','ai_conversations','refresh_tokens','tasks','audit_logs','outbox_events'] loop
+  foreach t in array array['companies','subscriptions','payments','devices','commands','analyses','history','monthly_sales','ai_conversations','refresh_tokens','tasks','audit_logs','outbox_events','connector_executions'] loop
     execute format('drop policy if exists vertice_tenant_isolation on %I',t);
     execute format('create policy vertice_tenant_isolation on %I for all to public using (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id)) with check (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id))',t);
   end loop;
