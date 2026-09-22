@@ -13,6 +13,16 @@ jobs:
     defaults:
       run:
         working-directory: server
+    env:
+      POSTGRES_PASSWORD: staging_admin_pw_ChangeMe_2026
+      APP_DB_PASSWORD: staging_app_pw_ChangeMe_2026
+      REDIS_PASSWORD: staging_redis_pw_ChangeMe_2026
+      JWT_SECRET: staging_jwt_secret_ChangeMe_2026_0123456789
+      VERTICE_MASTER_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      PAYMENT_CAPABILITY_SECRET: staging_payment_capability_ChangeMe_2026
+      DATABASE_URL: postgresql://vertice_app:staging_app_pw_ChangeMe_2026@localhost:5432/vertice_staging
+      REDIS_URL: redis://:staging_redis_pw_ChangeMe_2026@localhost:6379
+      DB_SSL_REJECT_UNAUTHORIZED: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -20,13 +30,92 @@ jobs:
       - run: npm install --no-audit --no-fund
       - run: npm run check
       - run: npm run typecheck
+      - name: Start staging
+        working-directory: .
+        run: |
+          docker compose -f docker-compose.staging.yml up -d --build
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/tmp/health.json; then cat /tmp/health.json; exit 0; fi
+            sleep 2
+          done
+          docker compose -f docker-compose.staging.yml ps
+          docker compose -f docker-compose.staging.yml logs --no-color
+          exit 1
+      - name: Apply base schema and Zero-Trust migrations
+        working-directory: .
+        run: |
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/db/schema.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_zero_trust_kernel.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_staging_hardening.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "alter role vertice_app nosuperuser nobypassrls nocreaterole nocreatedb; grant usage on schema public to vertice_app; grant select,insert,update,delete on all tables in schema public to vertice_app; grant usage,select on all sequences in schema public to vertice_app;"
+      - name: Seed isolated tenants
+        working-directory: .
+        run: |
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging <<'SQL'
+          insert into users(id,email,password_hash) values
+            ('00000000-0000-0000-0000-000000000001','tenant-a@example.test','x'),
+            ('00000000-0000-0000-0000-000000000002','tenant-b@example.test','x')
+          on conflict (id) do nothing;
+          insert into tenants(id,name) values
+            ('10000000-0000-0000-0000-000000000001','Tenant A'),
+            ('10000000-0000-0000-0000-000000000002','Tenant B')
+          on conflict (id) do nothing;
+          insert into tenant_users(tenant_id,user_id,role) values
+            ('10000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001','OWNER'),
+            ('10000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000002','OWNER')
+          on conflict do nothing;
+          insert into subscriptions(user_id,tenant_id,plan,status,provider,current_period_start) values
+            ('00000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','staging','active','internal',now()),
+            ('00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002','staging','active','internal',now())
+          on conflict do nothing;
+          insert into devices(id,user_id,tenant_id,device_name,mode) values
+            ('device-a','00000000-0000-0000-0000-000000000001','10000000-0000-0000-0000-000000000001','A','comando'),
+            ('device-b','00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002','B','comando')
+          on conflict do nothing;
+          insert into commands(id,user_id,tenant_id,device_id,mode,command) values
+            ('20000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002','device-b','comando','foreign')
+          on conflict do nothing;
+          SQL
+          echo "STAGING_TEST_TENANT_ID=10000000-0000-0000-0000-000000000001" >> "$GITHUB_ENV"
+          echo "STAGING_TEST_USER_ID=00000000-0000-0000-0000-000000000001" >> "$GITHUB_ENV"
+      - name: RLS SQL isolation under vertice_app
+        run: |
+          PGPASSWORD="$APP_DB_PASSWORD" psql "$DATABASE_URL" -v ON_ERROR_STOP=1             -v TENANT_A_USER="$STAGING_TEST_USER_ID"             -v TENANT_A_ID="$STAGING_TEST_TENANT_ID"             -v TENANT_B_ID="10000000-0000-0000-0000-000000000002"             -f tests/rls-isolation.sql
       - run: npm run test:concurrency
-      - run: npm audit --audit-level=high
+      - name: Restart backend after migrations
+        working-directory: .
+        run: docker compose -f docker-compose.staging.yml restart backend worker
+      - name: MFA retention and HTTP tenant isolation
+        working-directory: server
+        env:
+          STAGING_BASE_URL: http://127.0.0.1:8080
+        run: |
+          sleep 3
+          TOKEN_A=$(node -e "const jwt=require('jsonwebtoken'); console.log(jwt.sign({sub:'00000000-0000-0000-0000-000000000001',tenant_id:'10000000-0000-0000-0000-000000000001',role:'OWNER'},process.env.JWT_SECRET,{issuer:'vertice',audience:'vertice-app',expiresIn:'10m'}))")
+          STATUS=$(curl -sS -o /tmp/mfa.json -w "%{http_code}" -X POST "$STAGING_BASE_URL/api/v1/execution" -H "Authorization: Bearer $TOKEN_A" -H "Idempotency-Key: mfa-staging-$(date +%s%N)" -H "Content-Type: application/json" --data '{"type":"payment","resource":"payment","operation":"charge","payload":{"amount":1}}')
+          test "$STATUS" = "202"
+          cat /tmp/mfa.json
+          ID=$(node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync('/tmp/mfa.json','utf8')).actionId)")
+          docker compose -f ../docker-compose.staging.yml exec -T postgres psql -U vertice_admin -d vertice_staging -Atc "select status from tasks where id='$ID'" | grep -qx awaiting_mfa
+          STAGING_TOKEN_A="$TOKEN_A" STAGING_FOREIGN_COMMAND_ID="20000000-0000-0000-0000-000000000001" STAGING_FOREIGN_DEVICE_ID="device-b" npm run test:rls:http
+      - run: npm run test:sandbox
+      - name: Dependency and filesystem security scans
+        run: npm audit --audit-level=high
       - uses: aquasecurity/trivy-action@v0.36.0
         with: {scan-type: fs, scan-ref: ".", severity: "HIGH,CRITICAL", exit-code: "1"}
       - uses: gitleaks/gitleaks-action@v2
         env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
-
+      - name: Staging evidence
+        if: always()
+        working-directory: .
+        run: |
+          docker compose -f docker-compose.staging.yml ps
+          docker compose -f docker-compose.staging.yml logs --no-color --tail=200 backend
+          docker compose -f docker-compose.staging.yml logs --no-color --tail=200 worker
+      - name: Teardown staging
+        if: always()
+        working-directory: .
+        run: docker compose -f docker-compose.staging.yml down -v
   codeql:
     runs-on: ubuntu-latest
     permissions:
