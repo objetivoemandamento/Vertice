@@ -153,6 +153,7 @@ create table if not exists outbox_events (
   created_at timestamptz not null default now()
 );
 
+create unique index if not exists uq_outbox_aggregate_event on outbox_events(tenant_id,aggregate_type,aggregate_id,event_type);
 create index if not exists idx_outbox_pending on outbox_events(status,available_at,created_at);
 
 create table if not exists connector_executions (
