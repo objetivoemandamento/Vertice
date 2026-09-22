@@ -3,7 +3,7 @@ import { workerRedis } from "./redis";
 import { actionSchema } from "../security/schemas";
 import { evaluatePolicy } from "../security/policyEngine";
 import { executeThroughConnector } from "../connectors/gateway";
-import { withTransaction } from "../db";
+import { withTransaction } from "../db.js";
 import { registerProductionConnectors } from "../connectors";
 
 const WORKER_ID = process.env.HOSTNAME || "worker-" + process.pid;
@@ -27,7 +27,7 @@ export const executionWorker = new Worker("vertice-execution", async job => {
   const intent = actionSchema.parse(job.data);
   const decision = evaluatePolicy(intent);
   if (!decision.allowed) throw new UnrecoverableError(decision.reason);
-  const task = (await import("../db")).query("select status,mfa_verified_at from tasks where id=$1 and tenant_id=$2",[intent.actionId,intent.tenantId]);
+  const task = (await import("../db.js")).query("select status,mfa_verified_at from tasks where id=$1 and tenant_id=$2",[intent.actionId,intent.tenantId]);
   const row=(await task).rows[0];
   if(decision.risk==="approval") throw new UnrecoverableError("APPROVAL_REQUIRED_BEFORE_WORKER");
   if(decision.risk==="mfa" && !row?.mfa_verified_at) throw new UnrecoverableError("MFA_REQUIRED_BEFORE_WORKER");
