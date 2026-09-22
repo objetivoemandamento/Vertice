@@ -452,7 +452,7 @@ app.post('/public/signup/checkout',async(req,res)=>{
     const params=stripeForm({'mode':'payment','success_url':String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),'cancel_url':String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel'),'line_items[0][price_data][currency]':currencyCode.toLowerCase(),'line_items[0][price_data][product_data][name]':'VÉRTICE — '+selected.name,'line_items[0][price_data][unit_amount]':String(Math.round(amount*100)),'line_items[0][quantity]':'1','metadata[payment_id]':String(payment.id),'metadata[external_reference]':ref});
     const session=await stripe('/v1/checkout/sessions',{method:'POST',body:params});
     await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[String(session.id),String(session.url||''),payment.id]);
-    return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url,statusToken:issuePaymentCapability(String(payment.id),String(u.id))});
+    return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url,statusToken:issuePaymentCapability(String(payment.id),String(u.id),String(tenantId))});
     });
   }catch(e){safeLog('[checkout]',safeError(e));return errorJson(res,e.status&&e.status<500?e.status:502,'Falha ao iniciar cobrança.');}
 });
