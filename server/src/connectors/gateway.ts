@@ -1,6 +1,6 @@
 import { actionSchema, type ActionIntent } from "../security/schemas";
 import { CircuitBreaker } from "./circuitBreaker";
-import { query, withTransaction } from "../db";
+import { query, withTransaction } from "../db.js";
 export type Connector={name:string;supports:(intent:ActionIntent)=>boolean;execute:(intent:ActionIntent)=>Promise<unknown>};
 const connectors=new Map<string,Connector>(); const breakers=new Map<string,CircuitBreaker>();
 const rateState=new Map<string,{started:number;count:number}>();
