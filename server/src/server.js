@@ -5,6 +5,8 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { query, withTransaction, waitForDatabase, closeDatabase } = require('./db');
 const { VERTICE_MARKETS } = require('./markets');
+const { buildCorsOptions, buildRateLimiter, tenantContextMiddleware } = require('./security/edge');
+const { redis } = require('./queue/redis');
 
 const app = express();
 app.disable('x-powered-by');
@@ -31,7 +33,7 @@ const PORT = Number(process.env.PORT || 8080);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = String(process.env.JWT_SECRET || '').trim();
 const JWT_ISSUER = process.env.JWT_ISSUER || 'vertice';
-const ACCESS_TTL = process.env.JWT_ACCESS_TTL || '30d';
+const ACCESS_TTL = process.env.JWT_ACCESS_TTL || '10m';
 const REFRESH_TTL_DAYS = Math.max(1, Number(process.env.JWT_REFRESH_DAYS || 90));
 const OWNER_LOGIN = String(process.env.OWNER_LOGIN || '').trim();
 const OWNER_PASSWORD = String(process.env.OWNER_PASSWORD || '');
@@ -73,6 +75,12 @@ function limitLogin(key) {
 }
 function signAccess(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TTL, issuer: JWT_ISSUER, audience: 'vertice-app' });
+}
+async function tenantIdForUser(id) {
+  const result = await query('select app_tenant_for_user($1) as tenant_id', [id]);
+  const tenantId = result.rows[0]?.tenant_id;
+  if (!tenantId) throw new Error('TENANT_NOT_FOUND');
+  return tenantId;
 }
 function signRefresh(payload) {
   return jwt.sign({ ...payload, type: 'refresh' }, JWT_SECRET, { expiresIn: REFRESH_TTL_DAYS + 'd', issuer: JWT_ISSUER, audience: 'vertice-refresh' });
@@ -229,8 +237,10 @@ app.post('/webhooks/stripe', express.raw({ type: 'application/json', limit: '2mb
   } catch (e) { return errorJson(res, 400, 'Webhook Stripe inválido.'); }
 });
 
-app.use(cors());
+app.use(cors(buildCorsOptions()));
 app.use(express.json({ limit: '8mb', strict: true }));
+app.use(buildRateLimiter(redis));
+app.use(tenantContextMiddleware(verifyAccess));
 
 app.get('/health', async (req, res) => {
   try {
@@ -257,7 +267,7 @@ app.post('/auth/register', async (req, res) => {
       return u;
     });
     const u = result;
-    const accessToken = signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER' });
+    const accessToken = signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(u.id) });
     const refreshToken = await issueRefreshToken(u.id, 'CUSTOMER');
     res.status(201).json({ token: accessToken, refreshToken, role: 'CUSTOMER', customer: { id: u.id, email: u.email }, market });
   } catch (e) {
@@ -281,14 +291,14 @@ app.post('/auth/login', async (req, res) => {
   const password = String(req.body?.password || '');
   if (OWNER_LOGIN && login === OWNER_LOGIN.toLowerCase() && OWNER_PASSWORD && password === OWNER_PASSWORD) {
     const ownerId = await ensureOwnerIdentity();
-    const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' });
+    const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER', tenant_id: await tenantIdForUser(ownerId) });
     return res.json({ token, refreshToken: await issueRefreshToken(ownerId, 'OWNER'), role: 'OWNER', customer: { id: ownerId, email: OWNER_LOGIN } });
   }
   try {
     const r = await query('select id,email,password_hash,country_code,locale from users where email=$1', [login]);
     const c = r.rows[0];
     if (!c || !(await bcrypt.compare(password, c.password_hash))) return errorJson(res, 401, 'Login ou senha inválidos.');
-    const token = signAccess({ sub: c.id, email: c.email, role: 'CUSTOMER' });
+    const token = signAccess({ sub: c.id, email: c.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(c.id) });
     const refreshToken = await issueRefreshToken(c.id, 'CUSTOMER');
     res.json({ token, refreshToken, role: 'CUSTOMER', customer: { id: c.id, email: c.email }, market: marketMap.get(c.country_code) || marketMap.get('BR') });
   } catch (e) { console.error('[auth/login]', e.message); return errorJson(res, 500, 'Falha de autenticação.'); }
@@ -300,14 +310,14 @@ app.post('/auth/refresh', async (req, res) => {
   try {
     const payload = verifyRefresh(token);
     if (payload.type !== 'refresh') throw new Error('invalid');
-    if (payload.role === 'OWNER') { const ownerId = await ensureOwnerIdentity(); return res.json({ token: signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' }), refreshToken: token, role: 'OWNER' }); }
+    if (payload.role === 'OWNER') { const ownerId = await ensureOwnerIdentity(); return res.json({ token: signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER', tenant_id: await tenantIdForUser(ownerId) }), refreshToken: token, role: 'OWNER' }); }
     const found = await query('select user_id from refresh_tokens where token_hash=$1 and revoked_at is null and expires_at>now()', [hashToken(token)]);
     if (!found.rows[0]) return errorJson(res, 401, 'Refresh token inválido ou revogado.');
     await query('update refresh_tokens set revoked_at=now() where token_hash=$1', [hashToken(token)]);
     const newRefresh = await issueRefreshToken(payload.sub, 'CUSTOMER');
     const u = (await query('select id,email from users where id=$1', [payload.sub])).rows[0];
     if (!u) return errorJson(res, 401, 'Usuário não encontrado.');
-    return res.json({ token: signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER' }), refreshToken: newRefresh, role: 'CUSTOMER' });
+    return res.json({ token: signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(u.id) }), refreshToken: newRefresh, role: 'CUSTOMER' });
   } catch { return errorJson(res, 401, 'Refresh token inválido ou expirado.'); }
 });
 
