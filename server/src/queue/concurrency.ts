@@ -1,0 +1,3 @@
+import { query, withTransaction } from "../db";
+export async function claimConcurrentTask(taskId:string,tenantId:string,workerId:string):Promise<boolean>{return withTransaction(async client=>(await client.query("update tasks set locked_by=$1,locked_until=now()+interval '30 seconds',status='running',attempts=attempts+1,updated_at=now() where id=$2 and tenant_id=$3 and status in ('queued','awaiting_mfa') and (locked_until is null or locked_until<now()) returning id",[workerId,taskId,tenantId])).rowCount===1);}
+export async function taskById(taskId:string,tenantId:string){const r=await query("select * from tasks where id=$1 and tenant_id=$2",[taskId,tenantId]);return r.rows[0]||null;}
