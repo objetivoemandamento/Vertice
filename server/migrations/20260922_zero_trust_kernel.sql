@@ -21,7 +21,7 @@ create table if not exists tenant_users (
 create index if not exists idx_tenant_users_user on tenant_users(user_id);
 
 insert into tenants(id,name)
-select gen_random_uuid(), coalesce(nullif(full_name,''),email)
+select gen_random_uuid(), coalesce(nullif(u.full_name,''),u.email)
 from users u
 where not exists (select 1 from tenant_users tu where tu.user_id=u.id);
 
@@ -186,12 +186,26 @@ create or replace function app_current_tenant() returns uuid language sql stable
   select nullif(current_setting('app.tenant_id', true),'')::uuid
 $$;
 
-create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer as $$
-  select exists(select 1 from tenant_users tu where tu.tenant_id=target and tu.user_id=nullif(current_setting('app.user_id',true),'')::uuid)
+create or replace function app_current_user() returns uuid language sql stable as $$
+  select nullif(current_setting('app.user_id', true),'')::uuid
 $$;
 
+create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $$
+  select exists(select 1 from tenant_users tu where tu.tenant_id=target and tu.user_id=app_current_user())
+$$;
+
+drop policy if exists vertice_tenant_isolation on tenants;
+create policy vertice_tenant_isolation on tenants for all to public
+using (id=app_current_tenant() and app_is_tenant_member(id))
+with check (id=app_current_tenant() and app_is_tenant_member(id));
+
+drop policy if exists vertice_tenant_user_isolation on tenant_users;
+create policy vertice_tenant_user_isolation on tenant_users for all to public
+using (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
+with check (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
+
 do $$ declare t text; begin
-  foreach t in array array['tenants','tenant_users','companies','subscriptions','payments','devices','commands','analyses','history','monthly_sales','ai_conversations','refresh_tokens','tasks','audit_logs','outbox_events'] loop
+  foreach t in array array['companies','subscriptions','payments','devices','commands','analyses','history','monthly_sales','ai_conversations','refresh_tokens','tasks','audit_logs','outbox_events'] loop
     execute format('drop policy if exists vertice_tenant_isolation on %I',t);
     execute format('create policy vertice_tenant_isolation on %I for all to public using (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id)) with check (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id))',t);
   end loop;
