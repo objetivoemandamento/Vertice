@@ -307,7 +307,8 @@ app.post('/auth/register', async (req, res) => {
 
 async function issueRefreshToken(subject, role) {
   const token = signRefresh({ sub: subject, role });
-  await query('insert into refresh_tokens(user_id,token_hash,expires_at) values($1,$2,now()+($3::text || \' days\')::interval)', [subject, hashToken(token), REFRESH_TTL_DAYS]);
+  const tenantId=await tenantIdForUser(subject);
+  await runWithTenantContext({tenantId,userId:String(subject),role:String(role),requestId:crypto.randomUUID()},async()=>query('insert into refresh_tokens(user_id,tenant_id,token_hash,expires_at) values($1,$2,$3,now()+($4::text || \' days\')::interval)', [subject,tenantId,hashToken(token),REFRESH_TTL_DAYS]));
   return token;
 }
 
