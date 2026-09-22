@@ -1,0 +1,56 @@
+begin;
+
+create table if not exists mfa_credentials (
+  user_id uuid not null references users(id) on delete cascade,
+  tenant_id uuid not null references tenants(id) on delete cascade,
+  secret_ciphertext text not null,
+  enabled boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key(user_id,tenant_id)
+);
+
+create table if not exists connector_credentials (
+  tenant_id uuid not null references tenants(id) on delete cascade,
+  provider text not null check(provider in ('github','vercel','mercado_pago')),
+  access_token_ciphertext text not null,
+  refresh_token_ciphertext text,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key(tenant_id,provider)
+);
+
+create table if not exists payment_capabilities (
+  payment_id uuid primary key references payments(id) on delete cascade,
+  tenant_id uuid not null references tenants(id) on delete cascade,
+  user_id uuid not null references users(id) on delete cascade,
+  issued_at timestamptz not null default now()
+);
+
+alter table tasks drop constraint if exists tasks_status_check;
+alter table tasks add constraint tasks_status_check check(status in ('queued','running','awaiting_mfa','completed','failed','dead'));
+
+alter table mfa_credentials enable row level security;
+alter table connector_credentials enable row level security;
+alter table payment_capabilities enable row level security;
+
+drop policy if exists vertice_tenant_isolation on mfa_credentials;
+create policy vertice_tenant_isolation on mfa_credentials for all to public
+using(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
+with check(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
+
+drop policy if exists vertice_tenant_isolation on connector_credentials;
+create policy vertice_tenant_isolation on connector_credentials for all to public
+using(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
+with check(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
+
+drop policy if exists vertice_tenant_isolation on payment_capabilities;
+create policy vertice_tenant_isolation on payment_capabilities for all to public
+using(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
+with check(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
+
+create index if not exists idx_tasks_mfa on tasks(status,tenant_id,updated_at) where status='awaiting_mfa';
+create index if not exists idx_connector_credentials_tenant on connector_credentials(tenant_id);
+
+commit;
