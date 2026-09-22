@@ -10,7 +10,10 @@
     "check": "node --check src/server.js && node --check src/db.js && node --check src/markets.js",
     "typecheck": "tsc --noEmit",
     "check:kernel": "tsx --eval \"import './src/security/policyEngine.ts'; import './src/security/schemas.ts';\"",
-    "worker": "tsx src/worker.ts"
+    "worker": "tsx src/worker.ts",
+    "test:concurrency": "tsx tests/concurrency.test.ts",
+    "test:rls": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f tests/rls-isolation.sql",
+    "security:check": "npm audit --audit-level=high"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
