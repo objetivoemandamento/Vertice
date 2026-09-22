@@ -9,7 +9,8 @@
     "start": "node src/server.js",
     "check": "node --check src/server.js && node --check src/db.js && node --check src/markets.js",
     "typecheck": "tsc --noEmit",
-    "check:kernel": "tsx --eval \"import './src/security/policyEngine.ts'; import './src/security/schemas.ts';\""
+    "check:kernel": "tsx --eval \"import './src/security/policyEngine.ts'; import './src/security/schemas.ts';\"",
+    "worker": "tsx src/worker.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
