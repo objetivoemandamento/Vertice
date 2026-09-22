@@ -288,6 +288,9 @@ app.post('/auth/register', async (req, res) => {
         const t = (await client.query('insert into tenants(name) values($1) returning id',[u.email])).rows[0];
         await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,u.id]);
       }
+      const resolvedTenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[u.id])).rows[0].tenant_id;
+      await client.query('select set_config($1,$2,true)',['app.tenant_id',resolvedTenant]);
+      await client.query('select set_config($1,$2,true)',['app.user_id',u.id]);
       await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,$3)', [u.id, 'basic', 'pending']);
       return u;
     });
@@ -425,6 +428,9 @@ app.post('/public/signup/checkout',async(req,res)=>{
         const t=(await client.query('insert into tenants(name) values($1) returning id',[email])).rows[0];
         await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,found.id]);
       }
+      const resolvedTenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[found.id])).rows[0].tenant_id;
+      await client.query('select set_config($1,$2,true)',['app.tenant_id',resolvedTenant]);
+      await client.query('select set_config($1,$2,true)',['app.user_id',found.id]);
       const s=(await client.query('select id,status from subscriptions where user_id=$1 order by updated_at desc limit 1',[found.id])).rows[0];
       if(s)await client.query('update subscriptions set plan=$1,status=\'pending\',current_period_start=null,current_period_end=null,updated_at=now() where id=$2',[selected.id,s.id]);
       else await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,\'pending\')',[found.id,selected.id]);
