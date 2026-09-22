@@ -1,0 +1,40 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: vertice_staging
+      POSTGRES_USER: vertice_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    command: ["postgres","-c","ssl=on","-c","password_encryption=scram-sha-256","-c","log_statement=none"]
+    volumes: [vertice_pg:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL","pg_isready -U vertice_app -d vertice_staging"],interval: 5s,timeout: 5s,retries: 20}
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASSWORD}"]
+    healthcheck: {test: ["CMD","redis-cli","-a","${REDIS_PASSWORD}","ping"],interval: 5s,timeout: 3s,retries: 20}
+  backend:
+    build: ./server
+    environment:
+      NODE_ENV: staging
+      DATABASE_URL: postgresql://vertice_app:${POSTGRES_PASSWORD}@postgres:5432/vertice_staging
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
+      PAYMENT_CAPABILITY_SECRET: ${PAYMENT_CAPABILITY_SECRET}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      DB_SSL_REJECT_UNAUTHORIZED: "false"
+      VERTICE_WORKER_CONCURRENCY: "10"
+    depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
+    ports: ["8080:8080"]
+  worker:
+    build: ./server
+    command: ["npm","run","worker"]
+    environment:
+      NODE_ENV: staging
+      DATABASE_URL: postgresql://vertice_app:${POSTGRES_PASSWORD}@postgres:5432/vertice_staging
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
+      PAYMENT_CAPABILITY_SECRET: ${PAYMENT_CAPABILITY_SECRET}
+    depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
+volumes: {vertice_pg: {}}
