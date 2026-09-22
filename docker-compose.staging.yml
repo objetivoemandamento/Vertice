@@ -5,12 +5,10 @@ services:
       POSTGRES_DB: vertice_staging
       POSTGRES_USER: vertice_admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     command: ["postgres","-c","password_encryption=scram-sha-256","-c","log_statement=none"]
     volumes:
       - vertice_pg:/var/lib/postgresql/data
-      - ./staging/init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
-    healthcheck: {test: ["CMD-SHELL","pg_isready -U vertice_app -d vertice_staging"],interval: 5s,timeout: 5s,retries: 20}
+    healthcheck: {test: ["CMD-SHELL","pg_isready -U vertice_admin -d vertice_staging"],interval: 5s,timeout: 5s,retries: 20}
   redis:
     image: redis:7-alpine
     command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASSWORD}"]
