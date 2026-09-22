@@ -306,8 +306,8 @@ app.post('/auth/register', async (req, res) => {
 });
 
 async function issueRefreshToken(subject, role) {
-  const token = signRefresh({ sub: subject, role });
   const tenantId=await tenantIdForUser(subject);
+  const token = signRefresh({ sub: subject, role, tenant_id: tenantId });
   await runWithTenantContext({tenantId,userId:String(subject),role:String(role),requestId:crypto.randomUUID()},async()=>query('insert into refresh_tokens(user_id,tenant_id,token_hash,expires_at) values($1,$2,$3,now()+($4::text || \' days\')::interval)', [subject,tenantId,hashToken(token),REFRESH_TTL_DAYS]));
   return token;
 }
@@ -334,25 +334,21 @@ app.post('/auth/login', async (req, res) => {
 });
 
 app.post('/auth/refresh', async (req, res) => {
-  const token = String(req.body?.refreshToken || '');
-  if (!token) return errorJson(res, 400, 'refreshToken é obrigatório.');
-  try {
-    const payload = verifyRefresh(token);
-    if (payload.type !== 'refresh') throw new Error('invalid');
-    if (payload.role === 'OWNER') { const ownerId = await ensureOwnerIdentity(); return res.json({ token: signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER', tenant_id: await tenantIdForUser(ownerId) }), refreshToken: token, role: 'OWNER' }); }
-    const found = await query('select id,user_id,tenant_id,revoked_at,expires_at from refresh_tokens where token_hash=$1', [hashToken(token)]);
-    if (!found.rows[0]) return errorJson(res, 401, 'Refresh token inválido ou inexistente.');
-    if (found.rows[0].revoked_at) {
-      await query('update refresh_tokens set revoked_at=coalesce(revoked_at,now()) where user_id=$1 and tenant_id=$2 and revoked_at is null',[found.rows[0].user_id,found.rows[0].tenant_id]);
-      return errorJson(res, 401, 'Reuse de refresh token detectado. Sessões revogadas.', 'REFRESH_REUSE_DETECTED');
-    }
-    if (new Date(found.rows[0].expires_at).getTime() <= Date.now()) return errorJson(res, 401, 'Refresh token expirado.');
-    await query('update refresh_tokens set revoked_at=now() where id=$1',[found.rows[0].id]);
-    const newRefresh = await issueRefreshToken(payload.sub, payload.role || 'CUSTOMER');
-    const u = (await query('select id,email from users where id=$1', [payload.sub])).rows[0];
-    if (!u) return errorJson(res, 401, 'Usuário não encontrado.');
-    return res.json({ token: signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(u.id) }), refreshToken: newRefresh, role: 'CUSTOMER' });
-  } catch { return errorJson(res, 401, 'Refresh token inválido ou expirado.'); }
+  const token=String(req.body?.refreshToken||''); if(!token)return errorJson(res,400,'refreshToken é obrigatório.');
+  try{
+    const payload=verifyRefresh(token);
+    if(payload.type!=='refresh'||typeof payload.tenant_id!=='string')throw new Error('invalid');
+    return await runWithTenantContext({tenantId:String(payload.tenant_id),userId:String(payload.sub),role:String(payload.role||'CUSTOMER'),requestId:crypto.randomUUID()},async()=>{
+      const found=await query('select id,user_id,tenant_id,revoked_at,expires_at from refresh_tokens where token_hash=$1',[hashToken(token)]);
+      if(!found.rows[0])return errorJson(res,401,'Refresh token inválido ou inexistente.');
+      if(found.rows[0].revoked_at){await query('update refresh_tokens set revoked_at=coalesce(revoked_at,now()) where user_id=$1 and tenant_id=$2 and revoked_at is null',[found.rows[0].user_id,found.rows[0].tenant_id]);return errorJson(res,401,'Reuse de refresh token detectado. Sessões revogadas.','REFRESH_REUSE_DETECTED');}
+      if(new Date(found.rows[0].expires_at).getTime()<=Date.now())return errorJson(res,401,'Refresh token expirado.');
+      await query('update refresh_tokens set revoked_at=now() where id=$1',[found.rows[0].id]);
+      const u=(await query('select id,email from users where id=$1',[payload.sub])).rows[0]; if(!u)return errorJson(res,401,'Usuário não encontrado.');
+      const newRefresh=await issueRefreshToken(u.id,payload.role||'CUSTOMER');
+      return res.json({token:signAccess({sub:u.id,email:u.email,role:payload.role||'CUSTOMER',tenant_id:payload.tenant_id}),refreshToken:newRefresh,role:payload.role||'CUSTOMER'});
+    });
+  }catch{return errorJson(res,401,'Refresh token inválido ou expirado.');}
 });
 
 app.get('/me', auth, async (req, res) => {
