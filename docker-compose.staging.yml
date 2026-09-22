@@ -16,7 +16,7 @@ services:
   backend:
     build: ./server
     environment:
-      NODE_ENV: staging
+      NODE_ENV: production
       DATABASE_URL: postgresql://vertice_app:${APP_DB_PASSWORD}@postgres:5432/vertice_staging
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET}
@@ -37,5 +37,6 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
       PAYMENT_CAPABILITY_SECRET: ${PAYMENT_CAPABILITY_SECRET}
+      CORS_ORIGINS: ${CORS_ORIGINS}
     depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
 volumes: {vertice_pg: {}}
