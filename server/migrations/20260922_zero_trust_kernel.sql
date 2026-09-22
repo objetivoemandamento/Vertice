@@ -155,6 +155,24 @@ create table if not exists outbox_events (
 
 create index if not exists idx_outbox_pending on outbox_events(status,available_at,created_at);
 
+create table if not exists connector_executions (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid not null references tenants(id) on delete cascade,
+  idempotency_key text not null,
+  connector text not null,
+  status text not null check(status in ('running','completed','failed')),
+  response jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(tenant_id,idempotency_key)
+);
+create index if not exists idx_connector_exec_tenant on connector_executions(tenant_id,created_at desc);
+alter table connector_executions enable row level security;
+drop policy if exists vertice_tenant_isolation on connector_executions;
+create policy vertice_tenant_isolation on connector_executions for all to public
+using (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
+with check (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
+
 create index if not exists idx_all_tenant_companies on companies(tenant_id);
 create index if not exists idx_all_tenant_subscriptions on subscriptions(tenant_id);
 create index if not exists idx_all_tenant_payments on payments(tenant_id);
