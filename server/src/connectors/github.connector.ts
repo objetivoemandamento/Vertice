@@ -4,7 +4,7 @@ import type { Connector } from "./gateway";
 import type { ActionIntent } from "../security/schemas";
 import { decryptSecret } from "../security/secretVault";
 const payload=z.object({action:z.enum(["create_repo","create_file","create_pr","create_webhook","get_repo"]),owner:z.string().optional(),repo:z.string().optional(),name:z.string().optional(),path:z.string().optional(),content:z.string().optional(),branch:z.string().optional(),title:z.string().optional(),body:z.string().optional(),base:z.string().optional(),head:z.string().optional(),webhookUrl:z.string().url().optional()});
-async function token(tenantId:string){const r=await import("../db").then(m=>m.query("select access_token_ciphertext from connector_credentials where tenant_id=$1 and provider='github' and enabled=true",[tenantId])); if(!r.rows[0])throw new Error("GITHUB_CREDENTIAL_NOT_CONFIGURED"); return decryptSecret(r.rows[0].access_token_ciphertext);}
+async function token(tenantId:string){const r=await import("../db.js").then(m=>m.query("select access_token_ciphertext from connector_credentials where tenant_id=$1 and provider='github' and enabled=true",[tenantId])); if(!r.rows[0])throw new Error("GITHUB_CREDENTIAL_NOT_CONFIGURED"); return decryptSecret(r.rows[0].access_token_ciphertext);}
 export const githubConnector:Connector={name:"github",supports:i=>i.resource==="github",execute:async(i:ActionIntent)=>{
  const p=payload.parse(i.payload),t=await token(i.tenantId),h={Authorization:"Bearer "+t,"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"};
  if(p.action==="create_repo")return (await httpJson("https://api.github.com/user/repos",{method:"POST",headers:h,body:JSON.stringify({name:p.name,private:true})})).data;
