@@ -1,16 +1,19 @@
 #!/bin/sh
 set -eu
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<SQL
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -v app_db_password="$APP_DB_PASSWORD" <<'SQL'
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='vertice_app') THEN
-    CREATE ROLE vertice_app LOGIN PASSWORD '${APP_DB_PASSWORD}';
+    EXECUTE format('CREATE ROLE vertice_app LOGIN PASSWORD %L', :'app_db_password');
   ELSE
-    ALTER ROLE vertice_app PASSWORD '${APP_DB_PASSWORD}';
+    EXECUTE format('ALTER ROLE vertice_app PASSWORD %L', :'app_db_password');
   END IF;
 END
 $$;
-GRANT CONNECT ON DATABASE $POSTGRES_DB TO vertice_app;
+
+ALTER ROLE vertice_app NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
+GRANT CONNECT ON DATABASE :"POSTGRES_DB" TO vertice_app;
 GRANT USAGE ON SCHEMA public TO vertice_app;
 GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO vertice_app;
 GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO vertice_app;
