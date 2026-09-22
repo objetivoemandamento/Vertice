@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { query, runWithTenantContext } from "../src/db";
 import { encryptSecret } from "../src/security/secretVault";
 const provider=String(process.argv[2]||"").trim();
