@@ -44,6 +44,7 @@ jobs:
       - name: Apply base schema and Zero-Trust migrations
         working-directory: .
         run: |
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "create role authenticated nologin; create schema if not exists auth; create or replace function auth.uid() returns uuid language sql stable as \$\$ select nullif(current_setting('app.user_id',true),'')::uuid \$\$;" 
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/db/schema.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_zero_trust_kernel.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_staging_hardening.sql
@@ -75,6 +76,8 @@ jobs:
           insert into commands(id,user_id,tenant_id,device_id,mode,command) values
             ('20000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002','device-b','comando','foreign')
           on conflict do nothing;
+          insert into companies(id,name,owner_user_id,tenant_id) values ('30000000-0000-0000-0000-000000000001','Company B','00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002') on conflict (id) do nothing;
+          insert into payments(id,user_id,tenant_id,provider,external_reference,amount,currency_code,status) values ('40000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000002','10000000-0000-0000-0000-000000000002','internal','staging-b-payment',1,'BRL','pending') on conflict (id) do nothing;
           SQL
           echo "STAGING_TEST_TENANT_ID=10000000-0000-0000-0000-000000000001" >> "$GITHUB_ENV"
           echo "STAGING_TEST_USER_ID=00000000-0000-0000-0000-000000000001" >> "$GITHUB_ENV"
