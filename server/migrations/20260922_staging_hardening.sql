@@ -1,14 +1,14 @@
 begin;
 
-create or replace function app_tenant_for_payment(p_provider text, p_payment_id text) returns uuid language sql stable security definer set search_path=public as $
+create or replace function app_tenant_for_payment(p_provider text, p_payment_id text) returns uuid language sql stable security definer set search_path=public as $$
   select tenant_id from payments where provider=p_provider and (provider_payment_id=p_payment_id or provider_order_id=p_payment_id) order by created_at desc limit 1
-$;
+$$;
 
-create or replace function app_user_for_payment(p_provider text, p_payment_id text) returns uuid language sql stable security definer set search_path=public as $
+create or replace function app_user_for_payment(p_provider text, p_payment_id text) returns uuid language sql stable security definer set search_path=public as $$
   select user_id from payments where provider=p_provider and (provider_payment_id=p_payment_id or provider_order_id=p_payment_id) order by created_at desc limit 1
-$;
+$$;
 
-create or replace function app_create_tenant_for_user(p_user_id uuid,p_name text) returns uuid language plpgsql security definer set search_path=public as $
+create or replace function app_create_tenant_for_user(p_user_id uuid,p_name text) returns uuid language plpgsql security definer set search_path=public as $$
 declare t uuid;
 begin
   select tenant_id into t from tenant_users where user_id=p_user_id order by created_at asc limit 1;
@@ -16,7 +16,7 @@ begin
   insert into tenants(name) values(left(p_name,200)) returning id into t;
   insert into tenant_users(tenant_id,user_id,role) values(t,p_user_id,'OWNER');
   return t;
-end $;
+end $$;
 
 create table if not exists mfa_credentials (
   user_id uuid not null references users(id) on delete cascade,
