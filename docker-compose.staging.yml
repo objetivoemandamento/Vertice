@@ -11,7 +11,7 @@ services:
     healthcheck: {test: ["CMD-SHELL","pg_isready -U vertice_admin -d vertice_staging"],interval: 5s,timeout: 5s,retries: 20}
   redis:
     image: redis:7-alpine
-    command: ["redis-server","--appendonly","yes","--requirepass","${REDIS_PASSWORD}"]
+    command: ["redis-server","--appendonly","${REDIS_APPENDONLY:-yes}","--save","","--requirepass","${REDIS_PASSWORD}"]
     healthcheck: {test: ["CMD","redis-cli","-a","${REDIS_PASSWORD}","ping"],interval: 5s,timeout: 3s,retries: 20}
   backend:
     build: ./server
