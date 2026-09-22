@@ -1,5 +1,9 @@
 begin;
 
+create or replace function app_tenant_for_payment(provider_name text, provider_payment_id text) returns uuid language sql stable security definer set search_path=public as $
+  select tenant_id from payments where provider=provider_name and (provider_payment_id=provider_payment_id or provider_order_id=provider_payment_id) order by created_at desc limit 1
+$;
+
 create table if not exists mfa_credentials (
   user_id uuid not null references users(id) on delete cascade,
   tenant_id uuid not null references tenants(id) on delete cascade,
