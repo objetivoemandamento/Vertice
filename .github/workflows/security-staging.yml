@@ -34,7 +34,10 @@ jobs:
       - name: Start staging
         working-directory: .
         run: |
-          docker compose -f docker-compose.staging.yml up -d --build
+          docker compose -f docker-compose.staging.yml up -d postgres redis
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -v app_db_password="$APP_DB_PASSWORD" -c "create role vertice_app login nosuperuser nobypassrls nocreaterole nocreatedb noreplication password :'app_db_password';"
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "grant connect on database vertice_staging to vertice_app; grant usage on schema public to vertice_app; alter default privileges in schema public grant select,insert,update,delete on tables to vertice_app; alter default privileges in schema public grant usage,select on sequences to vertice_app;"
+          docker compose -f docker-compose.staging.yml up -d --build backend worker
           for i in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8080/health >/tmp/health.json; then cat /tmp/health.json; exit 0; fi
             sleep 2
