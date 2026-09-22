@@ -166,6 +166,37 @@ create index if not exists idx_all_tenant_sales on monthly_sales(tenant_id);
 create index if not exists idx_all_tenant_ai on ai_conversations(tenant_id);
 create index if not exists idx_all_tenant_refresh on refresh_tokens(tenant_id);
 
+create or replace function enforce_user_tenant() returns trigger language plpgsql security definer set search_path=public as $
+declare resolved uuid;
+begin
+  select tenant_id into resolved from tenant_users where user_id=coalesce(new.user_id,new.owner_user_id) order by created_at asc limit 1;
+  if resolved is null then raise exception 'TENANT_NOT_FOUND_FOR_USER'; end if;
+  if new.tenant_id is not null and new.tenant_id <> resolved then raise exception 'TENANT_MISMATCH'; end if;
+  new.tenant_id := resolved;
+  return new;
+end $;
+
+drop trigger if exists trg_companies_tenant on companies;
+create trigger trg_companies_tenant before insert or update of owner_user_id,tenant_id on companies for each row execute function enforce_user_tenant();
+drop trigger if exists trg_subscriptions_tenant on subscriptions;
+create trigger trg_subscriptions_tenant before insert or update of user_id,tenant_id on subscriptions for each row execute function enforce_user_tenant();
+drop trigger if exists trg_payments_tenant on payments;
+create trigger trg_payments_tenant before insert or update of user_id,tenant_id on payments for each row execute function enforce_user_tenant();
+drop trigger if exists trg_devices_tenant on devices;
+create trigger trg_devices_tenant before insert or update of user_id,tenant_id on devices for each row execute function enforce_user_tenant();
+drop trigger if exists trg_commands_tenant on commands;
+create trigger trg_commands_tenant before insert or update of user_id,tenant_id on commands for each row execute function enforce_user_tenant();
+drop trigger if exists trg_analyses_tenant on analyses;
+create trigger trg_analyses_tenant before insert or update of user_id,tenant_id on analyses for each row execute function enforce_user_tenant();
+drop trigger if exists trg_history_tenant on history;
+create trigger trg_history_tenant before insert or update of user_id,tenant_id on history for each row execute function enforce_user_tenant();
+drop trigger if exists trg_monthly_sales_tenant on monthly_sales;
+create trigger trg_monthly_sales_tenant before insert or update of user_id,tenant_id on monthly_sales for each row execute function enforce_user_tenant();
+drop trigger if exists trg_ai_conversations_tenant on ai_conversations;
+create trigger trg_ai_conversations_tenant before insert or update of user_id,tenant_id on ai_conversations for each row execute function enforce_user_tenant();
+drop trigger if exists trg_refresh_tokens_tenant on refresh_tokens;
+create trigger trg_refresh_tokens_tenant before insert or update of user_id,tenant_id on refresh_tokens for each row execute function enforce_user_tenant();
+
 alter table tenant_users enable row level security;
 alter table tenants enable row level security;
 alter table companies enable row level security;
