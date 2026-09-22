@@ -413,6 +413,11 @@ app.post('/public/signup/checkout',async(req,res)=>{
       let found=(await client.query('select id,password_hash from users where email=$1',[email])).rows[0];
       if(found){if(!(await bcrypt.compare(password,found.password_hash)))throw Object.assign(new Error('Conta existente.'),{status:409});}
       else found=(await client.query('insert into users(email,password_hash,country_code,locale) values($1,$2,$3,$4) returning id,password_hash',[email,hash,market.countryCode,market.locale])).rows[0];
+      const tenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[found.id])).rows[0]?.tenant_id;
+      if(!tenant){
+        const t=(await client.query('insert into tenants(name) values($1) returning id',[email])).rows[0];
+        await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,found.id]);
+      }
       const s=(await client.query('select id,status from subscriptions where user_id=$1 order by updated_at desc limit 1',[found.id])).rows[0];
       if(s)await client.query('update subscriptions set plan=$1,status=\'pending\',current_period_start=null,current_period_end=null,updated_at=now() where id=$2',[selected.id,s.id]);
       else await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,\'pending\')',[found.id,selected.id]);
