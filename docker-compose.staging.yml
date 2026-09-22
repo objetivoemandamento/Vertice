@@ -3,10 +3,12 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: vertice_staging
-      POSTGRES_USER: vertice_app
+      POSTGRES_USER: vertice_admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     command: ["postgres","-c","ssl=on","-c","password_encryption=scram-sha-256","-c","log_statement=none"]
-    volumes: [vertice_pg:/var/lib/postgresql/data]
+    volumes:
+      - vertice_pg:/var/lib/postgresql/data
+      - ./staging/init-db.sh:/docker-entrypoint-initdb.d/01-init-db.sh:ro
     healthcheck: {test: ["CMD-SHELL","pg_isready -U vertice_app -d vertice_staging"],interval: 5s,timeout: 5s,retries: 20}
   redis:
     image: redis:7-alpine
@@ -16,7 +18,7 @@ services:
     build: ./server
     environment:
       NODE_ENV: staging
-      DATABASE_URL: postgresql://vertice_app:${POSTGRES_PASSWORD}@postgres:5432/vertice_staging
+      DATABASE_URL: postgresql://vertice_app:${APP_DB_PASSWORD}@postgres:5432/vertice_staging
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET}
       VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
