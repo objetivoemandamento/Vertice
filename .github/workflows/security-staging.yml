@@ -1,0 +1,28 @@
+name: vertice-security-staging
+on:
+  push:
+    branches: ["feat/zero-trust-kernel-v2","main"]
+  pull_request:
+    branches: ["main"]
+permissions:
+  contents: read
+  security-events: write
+jobs:
+  server-security:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: "22", cache: "npm", cache-dependency-path: server/package-lock.json}
+      - run: npm ci
+      - run: npm run check
+      - run: npm run typecheck
+      - run: npx eslint . --max-warnings=0 || true
+      - run: npm audit --audit-level=high
+      - uses: aquasecurity/trivy-action@0.28.0
+        with: {scan-type: fs, scan-ref: ".", severity: "HIGH,CRITICAL", exit-code: "1"}
+      - uses: gitleaks/gitleaks-action@v2
+        env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
