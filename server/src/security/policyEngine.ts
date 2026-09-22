@@ -10,6 +10,8 @@ export function evaluatePolicy(input:ActionIntent):PolicyDecision{
  if(input.idempotencyKey.length<16)return{risk:"deny",allowed:false,reason:"Idempotency key inválida.",policyVersion:VERSION};
  if(input.operation==="read")return{risk:"automatic",allowed:true,reason:"Leitura sem mutação.",policyVersion:VERSION};
  if(input.resource==="device"&&["create","update"].includes(input.operation))return{risk:"automatic",allowed:true,reason:"Registro de dispositivo no tenant do ator.",policyVersion:VERSION};
+ if(input.resource==="command"&&input.operation==="update")return{risk:"automatic",allowed:true,reason:"Atualização de estado de comando autorizada pelo ator.",policyVersion:VERSION};
+ if(input.resource==="command"&&input.operation==="execute")return{risk:"automatic",allowed:true,reason:"Entrega de comando ao terminal autorizada.",policyVersion:VERSION};
  if(input.resource==="command"&&input.operation==="create"){const mode=String(input.payload?.mode||"");return mode==="operacao"?{risk:"mfa",allowed:true,reason:"Comando operacional exige MFA.",policyVersion:VERSION}:{risk:"automatic",allowed:true,reason:"Comando não operacional permitido automaticamente.",policyVersion:VERSION};}
  if(["charge","refund","credential_change","delete"].includes(input.operation))return{risk:"mfa",allowed:true,reason:"Operação crítica exige aprovação e MFA.",policyVersion:VERSION};
  if(["publish","execute","create","update"].includes(input.operation))return{risk:"approval",allowed:true,reason:"Operação mutável exige aprovação.",policyVersion:VERSION};
