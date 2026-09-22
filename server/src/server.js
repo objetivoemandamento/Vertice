@@ -86,15 +86,12 @@ async function tenantIdForUser(id) {
   if (!tenantId) throw new Error('TENANT_NOT_FOUND');
   return tenantId;
 }
-async function ensureTenantForUser(id, name) {
-  const existing = await query('select app_tenant_for_user($1) as tenant_id', [id]);
-  if (existing.rows[0]?.tenant_id) return existing.rows[0].tenant_id;
-  const tenant = await withTransaction(async client => {
-    const t = (await client.query('insert into tenants(name) values($1) returning id', [String(name || id).slice(0,200)])).rows[0];
-    await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')', [t.id,id]);
-    return t.id;
-  });
-  return tenant;
+async function ensureTenantForUser(id,name) {
+  const existing=await query('select app_tenant_for_user($1) as tenant_id',[id]);
+  if(existing.rows[0]?.tenant_id)return existing.rows[0].tenant_id;
+  const created=(await query('select app_create_tenant_for_user($1,$2) as tenant_id',[id,String(name||id).slice(0,200)])).rows[0]?.tenant_id;
+  if(!created)throw new Error('TENANT_BOOTSTRAP_FAILED');
+  return created;
 }
 function signRefresh(payload) {
   return jwt.sign({ ...payload, type: 'refresh' }, JWT_SECRET, { expiresIn: REFRESH_TTL_DAYS + 'd', issuer: JWT_ISSUER, audience: 'vertice-refresh' });
