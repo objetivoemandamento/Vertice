@@ -127,15 +127,14 @@ const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
 async function ensureOwnerIdentity() {
   const existing = (await query('select id from users where email=$1', [OWNER_SYSTEM_EMAIL])).rows[0];
   if (existing?.id) {
-    await ensureTenantForUser(existing.id, 'VÉRTICE Owner');
-    const sub = await query('select id from subscriptions where user_id=$1 and status=\'active\' limit 1', [existing.id]);
-    if (!sub.rows[0]) await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [existing.id]);
+    const tenantId=await ensureTenantForUser(existing.id,'VÉRTICE Owner');
+    await runWithTenantContext({tenantId,userId:String(existing.id),role:'OWNER',requestId:crypto.randomUUID()},async()=>{const sub=await query('select id from subscriptions where user_id=$1 and status=\'active\' limit 1',[existing.id]);if(!sub.rows[0])await query('insert into subscriptions(user_id,tenant_id,plan,status,provider,current_period_start,current_period_end) values($1,$2,\'owner\',\'active\',\'internal\',now(),null)',[existing.id,tenantId]);});
     return existing.id;
   }
   const passwordHash = await bcrypt.hash(OWNER_PASSWORD || crypto.randomUUID(), 10);
   const created = (await query('insert into users(email,password_hash,full_name,country_code,locale) values($1,$2,$3,\'BR\',\'pt-BR\') returning id', [OWNER_SYSTEM_EMAIL,passwordHash,'VÉRTICE Owner'])).rows[0];
-  await ensureTenantForUser(created.id, 'VÉRTICE Owner');
-  await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [created.id]);
+  const tenantId=await ensureTenantForUser(created.id,'VÉRTICE Owner');
+  await runWithTenantContext({tenantId,userId:String(created.id),role:'OWNER',requestId:crypto.randomUUID()},async()=>query('insert into subscriptions(user_id,tenant_id,plan,status,provider,current_period_start,current_period_end) values($1,$2,\'owner\',\'active\',\'internal\',now(),null)',[created.id,tenantId]));
   return created.id;
 }
 
