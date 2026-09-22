@@ -1,22 +1,16 @@
 #!/bin/sh
 set -eu
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -v app_db_password="$APP_DB_PASSWORD" -v postgres_db="$POSTGRES_DB" <<'SQL'
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='vertice_app') THEN
-    EXECUTE format('CREATE ROLE vertice_app LOGIN PASSWORD %L', :'app_db_password');
-  ELSE
-    EXECUTE format('ALTER ROLE vertice_app PASSWORD %L', :'app_db_password');
-  END IF;
-END
-$$;
+PSQL="psql -v ON_ERROR_STOP=1 --username \"$POSTGRES_USER\" --dbname \"$POSTGRES_DB\""
+if $PSQL -tAc "select 1 from pg_roles where rolname='vertice_app'" | grep -q '^1$'; then
+  $PSQL -v app_db_password="$APP_DB_PASSWORD" -c "alter role vertice_app password :'app_db_password';"
+else
+  $PSQL -v app_db_password="$APP_DB_PASSWORD" -c "create role vertice_app login nosuperuser nobypassrls nocreaterole nocreatedb noreplication password :'app_db_password';"
+fi
 
-ALTER ROLE vertice_app NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB NOREPLICATION;
-GRANT CONNECT ON DATABASE  :"postgres_db" TO vertice_app;
-GRANT USAGE ON SCHEMA public TO vertice_app;
-GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO vertice_app;
-GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO vertice_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT,INSERT,UPDATE,DELETE ON TABLES TO vertice_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE,SELECT ON SEQUENCES TO vertice_app;
-SQL
+$PSQL -c "grant connect on database \"$POSTGRES_DB\" to vertice_app;
+grant usage on schema public to vertice_app;
+grant select,insert,update,delete on all tables in schema public to vertice_app;
+grant usage,select on all sequences in schema public to vertice_app;
+alter default privileges in schema public grant select,insert,update,delete on tables to vertice_app;
+alter default privileges in schema public grant usage,select on sequences to vertice_app;"
