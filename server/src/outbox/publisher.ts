@@ -1,5 +1,6 @@
+import { actionSchema } from "../security/schemas";
 import { executionQueue } from "../queue/executionQueue";
-import { query, withTransaction } from "../db";
+import { query, withTransaction } from "../db.js";
 
 type OutboxRow = {
   id: string;
@@ -28,7 +29,7 @@ export async function publishPendingOutbox(limit = 100): Promise<number> {
   for (const row of rows) {
     try {
       if (row.event_type === "execution.requested") {
-        await executionQueue.add("execute", row.payload, { jobId: row.aggregate_id });
+        await executionQueue.add("execute", actionSchema.parse(row.payload), { jobId: row.aggregate_id });
       }
       await query(
         "update outbox_events set status='published',published_at=now() where id=$1 and status='pending'",
