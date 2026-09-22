@@ -25,7 +25,7 @@ services:
       VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
       PAYMENT_CAPABILITY_SECRET: ${PAYMENT_CAPABILITY_SECRET}
       CORS_ORIGINS: ${CORS_ORIGINS}
-      DB_SSL_REJECT_UNAUTHORIZED: "true"
+      DB_SSL_REJECT_UNAUTHORIZED: "${DB_SSL_REJECT_UNAUTHORIZED:-false}"
       VERTICE_WORKER_CONCURRENCY: "10"
     depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
     ports: ["8080:8080"]
