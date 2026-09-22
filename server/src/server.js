@@ -82,6 +82,16 @@ async function tenantIdForUser(id) {
   if (!tenantId) throw new Error('TENANT_NOT_FOUND');
   return tenantId;
 }
+async function ensureTenantForUser(id, name) {
+  const existing = await query('select app_tenant_for_user($1) as tenant_id', [id]);
+  if (existing.rows[0]?.tenant_id) return existing.rows[0].tenant_id;
+  const tenant = await withTransaction(async client => {
+    const t = (await client.query('insert into tenants(name) values($1) returning id', [String(name || id).slice(0,200)])).rows[0];
+    await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')', [t.id,id]);
+    return t.id;
+  });
+  return tenant;
+}
 function signRefresh(payload) {
   return jwt.sign({ ...payload, type: 'refresh' }, JWT_SECRET, { expiresIn: REFRESH_TTL_DAYS + 'd', issuer: JWT_ISSUER, audience: 'vertice-refresh' });
 }
@@ -263,6 +273,11 @@ app.post('/auth/register', async (req, res) => {
     const result = await withTransaction(async client => {
       const user = await client.query('insert into users(email,password_hash,country_code,locale) values($1,$2,$3,$4) returning id,email,country_code,locale', [email, hash, market.countryCode, market.locale]);
       const u = user.rows[0];
+      const tenant = (await client.query('select app_tenant_for_user($1) as tenant_id',[u.id])).rows[0]?.tenant_id;
+      if (!tenant) {
+        const t = (await client.query('insert into tenants(name) values($1) returning id',[u.email])).rows[0];
+        await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,u.id]);
+      }
       await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,$3)', [u.id, 'basic', 'pending']);
       return u;
     });
@@ -291,6 +306,7 @@ app.post('/auth/login', async (req, res) => {
   const password = String(req.body?.password || '');
   if (OWNER_LOGIN && login === OWNER_LOGIN.toLowerCase() && OWNER_PASSWORD && password === OWNER_PASSWORD) {
     const ownerId = await ensureOwnerIdentity();
+    await ensureTenantForUser(ownerId, 'VÉRTICE Owner');
     const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER', tenant_id: await tenantIdForUser(ownerId) });
     return res.json({ token, refreshToken: await issueRefreshToken(ownerId, 'OWNER'), role: 'OWNER', customer: { id: ownerId, email: OWNER_LOGIN } });
   }
