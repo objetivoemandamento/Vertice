@@ -21,14 +21,14 @@ create table if not exists tenant_users (
 create index if not exists idx_tenant_users_user on tenant_users(user_id);
 
 insert into tenants(id,name)
-select gen_random_uuid(), coalesce(nullif(u.full_name,''),u.email)
+select gen_random_uuid(), 'VÉRTICE - ' || u.email
 from users u
 where not exists (select 1 from tenant_users tu where tu.user_id=u.id);
 
 insert into tenant_users(tenant_id,user_id,role)
 select t.id,u.id,'OWNER'
 from users u
-join tenants t on t.name=coalesce(nullif(u.full_name,''),u.email)
+join tenants t on t.name='VÉRTICE - ' || u.email
 where not exists(select 1 from tenant_users tu where tu.user_id=u.id);
 
 alter table companies add column if not exists tenant_id uuid;
