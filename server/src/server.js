@@ -3,7 +3,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { query, withTransaction, waitForDatabase, closeDatabase } = require('./db');
+const { query, withTransaction, runWithTenantContext, waitForDatabase, closeDatabase } = require('./db');
 const { VERTICE_MARKETS } = require('./markets');
 const { buildCorsOptions, buildRateLimiter, tenantContextMiddleware } = require('./security/edge');
 const { redis } = require('./queue/redis');
@@ -430,6 +430,8 @@ app.post('/public/signup/checkout',async(req,res)=>{
       else await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,\'pending\')',[found.id,selected.id]);
       return found;
     });
+    const tenantId=await tenantIdForUser(u.id);
+    return await runWithTenantContext({tenantId,userId:String(u.id),role:'CUSTOMER',requestId:crypto.randomUUID()},async()=>{
     const payment=(await query('insert into payments(user_id,provider,external_reference,amount,currency_code,status) values($1,$2,$3,$4,$5,\'pending\') returning id',[u.id,market.countryCode==='BR'||market.countryCode==='MX'?'mercado_pago':'stripe',null,amount,currencyCode])).rows[0];
     const ref=externalReference(u.id,payment.id);
     await query('update payments set external_reference=$1 where id=$2',[ref,payment.id]);
@@ -455,6 +457,7 @@ app.post('/public/signup/checkout',async(req,res)=>{
     const session=await stripe('/v1/checkout/sessions',{method:'POST',body:params});
     await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[String(session.id),String(session.url||''),payment.id]);
     return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url,statusToken:issuePaymentCapability(String(payment.id),String(u.id))});
+    });
   }catch(e){safeLog('[checkout]',safeError(e));return errorJson(res,e.status&&e.status<500?e.status:502,'Falha ao iniciar cobrança.');}
 });
 
