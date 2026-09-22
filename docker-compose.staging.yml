@@ -5,6 +5,7 @@ services:
       POSTGRES_DB: vertice_staging
       POSTGRES_USER: vertice_admin
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
     command: ["postgres","-c","password_encryption=scram-sha-256","-c","log_statement=none"]
     volumes:
       - vertice_pg:/var/lib/postgresql/data
@@ -24,7 +25,7 @@ services:
       VERTICE_MASTER_KEY: ${VERTICE_MASTER_KEY}
       PAYMENT_CAPABILITY_SECRET: ${PAYMENT_CAPABILITY_SECRET}
       CORS_ORIGINS: ${CORS_ORIGINS}
-      DB_SSL_REJECT_UNAUTHORIZED: "false"
+      DB_SSL_REJECT_UNAUTHORIZED: "true"
       VERTICE_WORKER_CONCURRENCY: "10"
     depends_on: {postgres: {condition: service_healthy}, redis: {condition: service_healthy}}
     ports: ["8080:8080"]
