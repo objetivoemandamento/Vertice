@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { strict as assert } from "node:assert";
 const DB=String(process.env.DATABASE_URL||"");
 if(!DB){console.log("SKIP concurrency test: DATABASE_URL not configured");process.exit(0);}
