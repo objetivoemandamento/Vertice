@@ -15,7 +15,8 @@
     "test:rls": "psql \"$DATABASE_URL\" -v ON_ERROR_STOP=1 -f tests/rls-isolation.sql",
     "security:check": "npm audit --audit-level=high",
     "provision:connector": "tsx scripts/provision-connector.ts",
-    "test:rls:http": "node tests/rls-http.test.mjs"
+    "test:rls:http": "node tests/rls-http.test.mjs",
+    "test:sandbox": "tsx tests/sandbox.test.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
