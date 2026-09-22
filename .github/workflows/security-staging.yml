@@ -35,6 +35,11 @@ jobs:
         working-directory: .
         run: |
           docker compose -f docker-compose.staging.yml up -d postgres redis
+          for i in $(seq 1 60); do
+            if docker compose -f docker-compose.staging.yml exec -T postgres pg_isready -U vertice_admin -d vertice_staging >/dev/null 2>&1 && docker compose -f docker-compose.staging.yml exec -T redis redis-cli -a "$REDIS_PASSWORD" ping >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker compose -f docker-compose.staging.yml exec -T postgres pg_isready -U vertice_admin -d vertice_staging
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -v app_db_password="$APP_DB_PASSWORD" -c "create role vertice_app login nosuperuser nobypassrls nocreaterole nocreatedb noreplication password :'app_db_password';"
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "grant connect on database vertice_staging to vertice_app; grant usage on schema public to vertice_app; alter default privileges in schema public grant select,insert,update,delete on tables to vertice_app; alter default privileges in schema public grant usage,select on sequences to vertice_app;"
           docker compose -f docker-compose.staging.yml up -d --build backend worker
