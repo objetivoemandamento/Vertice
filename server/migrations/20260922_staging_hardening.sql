@@ -29,7 +29,7 @@ create table if not exists payment_capabilities (
 );
 
 alter table tasks drop constraint if exists tasks_status_check;
-alter table tasks add constraint tasks_status_check check(status in ('queued','running','awaiting_mfa','completed','failed','dead'));
+alter table tasks add constraint tasks_status_check check(status in ('queued','running','awaiting_approval','awaiting_mfa','completed','failed','dead'));
 
 alter table mfa_credentials enable row level security;
 alter table connector_credentials enable row level security;
@@ -51,6 +51,7 @@ using(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
 with check(tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
 
 create index if not exists idx_tasks_mfa on tasks(status,tenant_id,updated_at) where status='awaiting_mfa';
+create index if not exists idx_tasks_approval on tasks(status,tenant_id,updated_at) where status='awaiting_approval';
 create index if not exists idx_connector_credentials_tenant on connector_credentials(tenant_id);
 
 commit;
