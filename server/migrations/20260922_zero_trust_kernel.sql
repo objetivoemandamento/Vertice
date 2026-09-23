@@ -240,11 +240,11 @@ alter table outbox_events enable row level security;
 
 create or replace function app_current_tenant() returns uuid language sql stable as $vertice$
   select nullif(current_setting('app.tenant_id', true),'')::uuid
-$$;
+$vertice$;
 
 create or replace function app_current_user() returns uuid language sql stable as $vertice$
   select nullif(current_setting('app.user_id', true),'')::uuid
-$$;
+$vertice$;
 
 create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $vertice$
   select exists(select 1 from tenant_users tu where tu.tenant_id=target and tu.user_id=app_current_user())
