@@ -264,7 +264,7 @@ create policy vertice_tenant_user_isolation on tenant_users for all to public
 using (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id))
 with check (tenant_id=app_current_tenant() and app_is_tenant_member(tenant_id));
 
-do $$ declare t text; begin
+do $vertice$ declare t text; begin
   foreach t in array array['companies','subscriptions','payments','devices','commands','analyses','history','monthly_sales','ai_conversations','refresh_tokens','tasks','audit_logs','outbox_events','connector_executions'] loop
     execute format('drop policy if exists vertice_tenant_isolation on %I',t);
     execute format('create policy vertice_tenant_isolation on %I for all to public using (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id)) with check (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id))',t);
