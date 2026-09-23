@@ -16,21 +16,21 @@
 
 | Gate | Resultado | Evidência runtime |
 |---|---|---|
-| `npm install` | **PASS** | Run #225 — concluído |
-| `npm run check` | **PASS** | Run #225 — exit 0 |
-| `npm run typecheck` | **PASS** | Run #225 — exit 0 |
-| Docker Compose / PostgreSQL / Redis | **PASS** | Run #225 — staging iniciado, serviços healthy |
-| Migrações base + Zero-Trust + hardening | **PASS** | Run #225 — etapa concluída |
-| Role `vertice_app` / RLS | **PASS** | Run #225 — teste SQL cross-tenant concluído |
-| Concorrência / idempotência | **PASS** | Run #225 — 32 contenders, 1 lease; duplicate idempotency sem novo insert |
-| Restart backend/worker | **PASS** | Run #225 — etapa concluída |
-| MFA / isolamento HTTP cross-tenant | **PASS** | Run #225 — etapa concluída |
-| Sandbox Docker | **PASS** | Run #225 — suíte concluída |
-| `npm audit --audit-level=high` | **PASS** | Run #225 — exit 0 |
-| Trivy HIGH/CRITICAL | **PASS** | Run #225 — exit 0 |
-| Gitleaks | **PASS** | Run #225 — exit 0 |
-| CodeQL | **PASS** | Run #225 — success |
-| Teardown staging | **PASS** | Run #225 — concluído |
+| `npm install` | **PASS** | Run #227 — concluído |
+| `npm run check` | **PASS** | Run #227 — exit 0 |
+| `npm run typecheck` | **PASS** | Run #227 — exit 0 |
+| Docker Compose / PostgreSQL / Redis | **PASS** | Run #227 — staging iniciado, serviços healthy |
+| Migrações base + Zero-Trust + hardening | **PASS** | Run #227 — etapa concluída |
+| Role `vertice_app` / RLS | **PASS** | Run #227 — teste SQL cross-tenant concluído |
+| Concorrência / idempotência | **PASS** | Run #227 — 32 contenders, 1 lease; duplicate idempotency sem novo insert |
+| Restart backend/worker | **PASS** | Run #227 — etapa concluída |
+| MFA / isolamento HTTP cross-tenant | **PASS** | Run #227 — etapa concluída |
+| Sandbox Docker | **PASS** | Run #227 — suíte concluída |
+| `npm audit --audit-level=high` | **PASS** | Run #227 — exit 0 |
+| Trivy HIGH/CRITICAL | **PASS** | Run #227 — exit 0 |
+| Gitleaks | **PASS** | Run #227 — exit 0 |
+| CodeQL | **PASS** | Run #227 — success |
+| Teardown staging | **PASS** | Run #227 — concluído |
 
 ## 2. Evolução dos bloqueios e correções
 
@@ -132,11 +132,11 @@ A correção final foi:
 - checkout com `fetch-depth: 0`;
 - migração de `gitleaks-action@v2` para `@v3`.
 
-O run #225 concluiu a etapa Gitleaks com **success**.
+O run #227 concluiu a etapa Gitleaks com **success**.
 
 ## 3. Evidência do pipeline final
 
-### Run #225 — `35805891128`
+### Run #227 — `35805891128`
 
 Job `server-security`:
 
@@ -169,7 +169,7 @@ Job `codeql`:
 Conclusão do workflow:
 
 ```
-Run #225 — success
+Run #227 — success
 ```
 
 ## 4. Segurança multi-tenant
@@ -222,7 +222,7 @@ O run final aprovou:
 - Trivy HIGH/CRITICAL;
 - Gitleaks.
 
-Nenhum destes gates bloqueou o run #225.
+Nenhum destes gates bloqueou o run #227.
 
 ## 8. Integridade da certificação
 
@@ -236,7 +236,7 @@ O parecer não deve ser transferido automaticamente para outro SHA sem nova exec
 
 ## 9. Parecer final
 
-Todos os gates definidos no protocolo de homologação foram executados no GitHub Actions e concluídos com sucesso no run #225.
+Todos os gates definidos no protocolo de homologação foram executados no GitHub Actions e concluídos com sucesso no run #227.
 
 # 🟢 GO PARA PRODUÇÃO
 
