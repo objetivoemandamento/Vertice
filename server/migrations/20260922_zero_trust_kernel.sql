@@ -124,7 +124,7 @@ create table if not exists audit_logs (
   created_at timestamptz not null default now()
 );
 
-create or replace function deny_audit_mutation() returns trigger language plpgsql as $vertice$$
+create or replace function deny_audit_mutation() returns trigger language plpgsql as $vertice$
 begin raise exception 'AUDIT_LOG_IMMUTABLE'; end $$;
 
 drop trigger if exists audit_logs_no_update on audit_logs;
@@ -181,7 +181,7 @@ create index if not exists idx_all_tenant_sales on monthly_sales(tenant_id);
 create index if not exists idx_all_tenant_ai on ai_conversations(tenant_id);
 create index if not exists idx_all_tenant_refresh on refresh_tokens(tenant_id);
 
-create or replace function enforce_user_tenant() returns trigger language plpgsql security definer set search_path=public as $vertice$$
+create or replace function enforce_user_tenant() returns trigger language plpgsql security definer set search_path=public as $vertice$
 declare resolved uuid;
 begin
   select tenant_id into resolved from tenant_users where user_id=new.user_id order by created_at asc limit 1;
@@ -191,7 +191,7 @@ begin
   return new;
 end $$;
 
-create or replace function enforce_owner_tenant() returns trigger language plpgsql security definer set search_path=public as $vertice$$
+create or replace function enforce_owner_tenant() returns trigger language plpgsql security definer set search_path=public as $vertice$
 declare resolved uuid;
 begin
   select tenant_id into resolved from tenant_users where user_id=new.owner_user_id order by created_at asc limit 1;
@@ -238,19 +238,19 @@ alter table tasks enable row level security;
 alter table audit_logs enable row level security;
 alter table outbox_events enable row level security;
 
-create or replace function app_current_tenant() returns uuid language sql stable as $vertice$$
+create or replace function app_current_tenant() returns uuid language sql stable as $vertice$
   select nullif(current_setting('app.tenant_id', true),'')::uuid
 $$;
 
-create or replace function app_current_user() returns uuid language sql stable as $vertice$$
+create or replace function app_current_user() returns uuid language sql stable as $vertice$
   select nullif(current_setting('app.user_id', true),'')::uuid
 $$;
 
-create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $vertice$vertice$
+create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $vertice$
   select exists(select 1 from tenant_users tu where tu.tenant_id=target and tu.user_id=app_current_user())
 $vertice$;
 
-create or replace function app_tenant_for_user(target uuid) returns uuid language sql stable security definer set search_path=public as $vertice$vertice$
+create or replace function app_tenant_for_user(target uuid) returns uuid language sql stable security definer set search_path=public as $vertice$
   select tenant_id from tenant_users where user_id=target order by created_at asc limit 1
 $vertice$;
 
