@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { rateLimit } = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const { RedisStore } = require('rate-limit-redis');
 const { runWithTenantContext } = require('../db');
 
@@ -28,7 +28,7 @@ function buildRateLimiter(redisClient) {
     keyGenerator: req => {
       const auth = String(req.headers.authorization || '');
       const tokenHash = auth.startsWith('Bearer ') ? crypto.createHash('sha256').update(auth.slice(7)).digest('hex').slice(0,32) : '';
-      return tokenHash ? 'auth:' + tokenHash : 'ip:' + req.ip;
+      return tokenHash ? 'auth:' + tokenHash : 'ip:' + ipKeyGenerator(req.ip);
     }
   });
 }
