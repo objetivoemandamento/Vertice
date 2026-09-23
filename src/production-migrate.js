@@ -2,7 +2,7 @@ const fs=require("fs");
 const path=require("path");
 const {Client}=require("pg");
 async function migrateProduction(){
- if(process.env.NODE_ENV!=="production"||process.env.VERTICE_AUTO_MIGRATE!=="true") return;
+ if(process.env.VERTICE_AUTO_MIGRATE!=="true") return;
  const client=new Client({connectionString:process.env.DATABASE_URL,ssl:{rejectUnauthorized:false}}); await client.connect();
  try{await client.query("select pg_advisory_lock(hashtext('vertice-zero-trust-production'))");
   for(const file of ["20260922_zero_trust_kernel.sql","20260922_staging_hardening.sql"]){await client.query(fs.readFileSync(path.join(__dirname,"../server/migrations",file),"utf8")); console.log("[vertice-migrate] applied",file);}
