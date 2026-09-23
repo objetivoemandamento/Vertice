@@ -24,6 +24,8 @@ jobs:
       REDIS_URL: redis://:staging_redis_pw_ChangeMe_2026@localhost:6379
       DB_SSL_REJECT_UNAUTHORIZED: "false"
       CORS_ORIGINS: http://127.0.0.1:8080
+      OWNER_LOGIN: owner@staging.vertice.test
+      OWNER_PASSWORD: StagingOwnerPassword_2026!
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -44,14 +46,8 @@ jobs:
           create role vertice_app login nosuperuser nobypassrls nocreaterole nocreatedb noreplication password :'app_db_password';
           SQL
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "grant connect on database vertice_staging to vertice_app; grant usage on schema public to vertice_app; alter default privileges in schema public grant select,insert,update,delete on tables to vertice_app; alter default privileges in schema public grant usage,select on sequences to vertice_app;"
-          docker compose -f docker-compose.staging.yml up -d --build backend worker
-          for i in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:8080/health >/tmp/health.json; then cat /tmp/health.json; exit 0; fi
-            sleep 2
-          done
           docker compose -f docker-compose.staging.yml ps
-          docker compose -f docker-compose.staging.yml logs --no-color
-          exit 1
+          echo "PostgreSQL/Redis ready; schema bootstrap will precede application startup."
       - name: Apply base schema and Zero-Trust migrations
         working-directory: .
         run: |
@@ -60,6 +56,12 @@ jobs:
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_zero_trust_kernel.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_staging_hardening.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "alter role vertice_app nosuperuser nobypassrls nocreaterole nocreatedb; grant usage on schema public to vertice_app; grant select,insert,update,delete on all tables in schema public to vertice_app; grant usage,select on all sequences in schema public to vertice_app;"
+          docker compose -f docker-compose.staging.yml up -d --build backend worker
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:8080/health >/tmp/health.json; then cat /tmp/health.json; break; fi
+            sleep 2
+          done
+          test -s /tmp/health.json
       - name: Seed isolated tenants
         working-directory: .
         run: |
