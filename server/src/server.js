@@ -3,8 +3,14 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { query, withTransaction, waitForDatabase, closeDatabase } = require('./db');
+const { query, withTransaction, runWithTenantContext, waitForDatabase, closeDatabase } = require('./db');
 const { VERTICE_MARKETS } = require('./markets');
+const { buildCorsOptions, buildRateLimiter, tenantContextMiddleware } = require('./security/edge');
+const { redis } = require('./queue/redis');
+const { enqueueExecution } = require('./queue/executionQueue');
+const { enrollMfa, enableMfa, verifyEnabledMfa } = require('./security/mfa');
+const { issuePaymentCapability, verifyPaymentCapability } = require('./security/paymentCapability');
+const { safeError, safeLog } = require('./observability/redaction');
 
 const app = express();
 app.disable('x-powered-by');
@@ -31,7 +37,7 @@ const PORT = Number(process.env.PORT || 8080);
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const JWT_SECRET = String(process.env.JWT_SECRET || '').trim();
 const JWT_ISSUER = process.env.JWT_ISSUER || 'vertice';
-const ACCESS_TTL = process.env.JWT_ACCESS_TTL || '30d';
+const ACCESS_TTL = process.env.JWT_ACCESS_TTL || '10m';
 const REFRESH_TTL_DAYS = Math.max(1, Number(process.env.JWT_REFRESH_DAYS || 90));
 const OWNER_LOGIN = String(process.env.OWNER_LOGIN || '').trim();
 const OWNER_PASSWORD = String(process.env.OWNER_PASSWORD || '');
@@ -74,6 +80,19 @@ function limitLogin(key) {
 function signAccess(payload) {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TTL, issuer: JWT_ISSUER, audience: 'vertice-app' });
 }
+async function tenantIdForUser(id) {
+  const result = await query('select app_tenant_for_user($1) as tenant_id', [id]);
+  const tenantId = result.rows[0]?.tenant_id;
+  if (!tenantId) throw new Error('TENANT_NOT_FOUND');
+  return tenantId;
+}
+async function ensureTenantForUser(id,name) {
+  const existing=await query('select app_tenant_for_user($1) as tenant_id',[id]);
+  if(existing.rows[0]?.tenant_id)return existing.rows[0].tenant_id;
+  const created=(await query('select app_create_tenant_for_user($1,$2) as tenant_id',[id,String(name||id).slice(0,200)])).rows[0]?.tenant_id;
+  if(!created)throw new Error('TENANT_BOOTSTRAP_FAILED');
+  return created;
+}
 function signRefresh(payload) {
   return jwt.sign({ ...payload, type: 'refresh' }, JWT_SECRET, { expiresIn: REFRESH_TTL_DAYS + 'd', issuer: JWT_ISSUER, audience: 'vertice-refresh' });
 }
@@ -105,13 +124,14 @@ const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
 async function ensureOwnerIdentity() {
   const existing = (await query('select id from users where email=$1', [OWNER_SYSTEM_EMAIL])).rows[0];
   if (existing?.id) {
-    const sub = await query('select id from subscriptions where user_id=$1 and status=\'active\' limit 1', [existing.id]);
-    if (!sub.rows[0]) await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [existing.id]);
+    const tenantId=await ensureTenantForUser(existing.id,'VÉRTICE Owner');
+    await runWithTenantContext({tenantId,userId:String(existing.id),role:'OWNER',requestId:crypto.randomUUID()},async()=>{const sub=await query('select id from subscriptions where user_id=$1 and status=\'active\' limit 1',[existing.id]);if(!sub.rows[0])await query('insert into subscriptions(user_id,tenant_id,plan,status,provider,current_period_start,current_period_end) values($1,$2,\'owner\',\'active\',\'internal\',now(),null)',[existing.id,tenantId]);});
     return existing.id;
   }
   const passwordHash = await bcrypt.hash(OWNER_PASSWORD || crypto.randomUUID(), 10);
   const created = (await query('insert into users(email,password_hash,full_name,country_code,locale) values($1,$2,$3,\'BR\',\'pt-BR\') returning id', [OWNER_SYSTEM_EMAIL,passwordHash,'VÉRTICE Owner'])).rows[0];
-  await query('insert into subscriptions(user_id,plan,status,provider,current_period_start,current_period_end) values($1,\'owner\',\'active\',\'internal\',now(),null)', [created.id]);
+  const tenantId=await ensureTenantForUser(created.id,'VÉRTICE Owner');
+  await runWithTenantContext({tenantId,userId:String(created.id),role:'OWNER',requestId:crypto.randomUUID()},async()=>query('insert into subscriptions(user_id,tenant_id,plan,status,provider,current_period_start,current_period_end) values($1,$2,\'owner\',\'active\',\'internal\',now(),null)',[created.id,tenantId]));
   return created.id;
 }
 
@@ -202,35 +222,34 @@ async function syncMercadoPagoPayment(paymentId) {
 }
 
 app.post('/webhooks/stripe', express.raw({ type: 'application/json', limit: '2mb' }), async (req, res) => {
-  const secret = String(process.env.STRIPE_WEBHOOK_SECRET || '');
-  if (!secret) return errorJson(res, 503, 'Stripe webhook não configurado.');
-  const signature = String(req.headers['stripe-signature'] || '');
-  if (!signature) return errorJson(res, 400, 'Assinatura Stripe ausente.');
-  // Signature verification is performed without a Stripe SDK to keep the backend lean.
-  // The endpoint accepts only events whose timestamped HMAC matches STRIPE_WEBHOOK_SECRET.
-  const parts = Object.fromEntries(signature.split(',').map(x => x.split('=')));
-  const timestamp = Number(parts.t);
-  const provided = String(parts.v1 || '');
-  if (!Number.isFinite(timestamp) || !provided || Math.abs(Date.now()/1000 - timestamp) > 300) return errorJson(res, 400, 'Assinatura Stripe expirada.');
-  const payload = Buffer.isBuffer(req.body) ? req.body.toString('utf8') : '';
-  const signed = timestamp + '.' + payload;
-  const expected = crypto.createHmac('sha256', secret).update(signed).digest('hex');
-  if (expected.length !== provided.length || !crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(provided))) return errorJson(res, 400, 'Assinatura Stripe inválida.');
-  try {
-    const event = JSON.parse(payload);
-    const object = event.data?.object || {};
-    const providerId = String(object.payment_intent || object.id || '');
-    const eventType = String(event.type || '');
-    let status = null;
-    if (/succeeded|paid|completed/.test(eventType)) status = 'paid';
-    else if (/failed|canceled|cancelled/.test(eventType)) status = eventType.includes('cancel') ? 'cancelled' : 'failed';
-    if (providerId && status) await updatePaymentByProvider('stripe', providerId, status, status === 'paid' ? new Date() : null);
-    return res.json({ received: true });
-  } catch (e) { return errorJson(res, 400, 'Webhook Stripe inválido.'); }
+  const secret=String(process.env.STRIPE_WEBHOOK_SECRET||'');if(!secret)return errorJson(res,503,'Stripe webhook não configurado.');
+  const signature=String(req.headers['stripe-signature']||'');if(!signature)return errorJson(res,400,'Assinatura Stripe ausente.');
+  const parts=Object.fromEntries(signature.split(',').map(x=>x.split('='))),timestamp=Number(parts.t),provided=String(parts.v1||'');
+  if(!Number.isFinite(timestamp)||!provided||Math.abs(Date.now()/1000-timestamp)>300)return errorJson(res,400,'Assinatura Stripe expirada.');
+  const payload=Buffer.isBuffer(req.body)?req.body.toString('utf8'):'';const expected=crypto.createHmac('sha256',secret).update(timestamp+'.'+payload).digest('hex');
+  if(expected.length!==provided.length||!crypto.timingSafeEqual(Buffer.from(expected),Buffer.from(provided)))return errorJson(res,400,'Assinatura Stripe inválida.');
+  try{
+    const event=JSON.parse(payload),eventId=String(event.id||''),object=event.data?.object||{},providerId=String(object.payment_intent||object.id||'');
+    if(!eventId||!providerId)return res.json({received:true});
+    const tenantId=(await query('select app_tenant_for_payment($1,$2) as tenant_id',['stripe',providerId])).rows[0]?.tenant_id;
+    if(!tenantId)return res.json({received:true});
+    const userId=(await query('select app_user_for_payment($1,$2) as user_id',['stripe',providerId])).rows[0]?.user_id;
+    if(!userId)return res.json({received:true});
+    return await runWithTenantContext({tenantId:String(tenantId),userId:String(userId),role:'SYSTEM',requestId:crypto.randomUUID()},async()=>{
+      const dedupe=await query("insert into webhook_events(provider,event_id,payload,received_at) values('stripe',$1,$2,now()) on conflict(provider,event_id) do nothing returning id",[eventId,JSON.stringify(event)]);
+      if(dedupe.rowCount===0)return res.json({received:true,deduplicated:true});
+      const eventType=String(event.type||'');let status=null;
+      if(/succeeded|paid|completed/.test(eventType))status='paid';else if(/failed|canceled|cancelled/.test(eventType))status=eventType.includes('cancel')?'cancelled':'failed';
+      if(status)await updatePaymentByProvider('stripe',providerId,status,status==='paid'?new Date():null);
+      return res.json({received:true});
+    });
+  }catch{return errorJson(res,400,'Webhook Stripe inválido.');}
 });
 
-app.use(cors());
+app.use(cors(buildCorsOptions()));
 app.use(express.json({ limit: '8mb', strict: true }));
+app.use(buildRateLimiter(redis));
+app.use(tenantContextMiddleware(verifyAccess));
 
 app.get('/health', async (req, res) => {
   try {
@@ -253,11 +272,19 @@ app.post('/auth/register', async (req, res) => {
     const result = await withTransaction(async client => {
       const user = await client.query('insert into users(email,password_hash,country_code,locale) values($1,$2,$3,$4) returning id,email,country_code,locale', [email, hash, market.countryCode, market.locale]);
       const u = user.rows[0];
+      const tenant = (await client.query('select app_tenant_for_user($1) as tenant_id',[u.id])).rows[0]?.tenant_id;
+      if (!tenant) {
+        const t = (await client.query('insert into tenants(name) values($1) returning id',[u.email])).rows[0];
+        await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,u.id]);
+      }
+      const resolvedTenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[u.id])).rows[0].tenant_id;
+      await client.query('select set_config($1,$2,true)',['app.tenant_id',resolvedTenant]);
+      await client.query('select set_config($1,$2,true)',['app.user_id',u.id]);
       await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,$3)', [u.id, 'basic', 'pending']);
       return u;
     });
     const u = result;
-    const accessToken = signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER' });
+    const accessToken = signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(u.id) });
     const refreshToken = await issueRefreshToken(u.id, 'CUSTOMER');
     res.status(201).json({ token: accessToken, refreshToken, role: 'CUSTOMER', customer: { id: u.id, email: u.email }, market });
   } catch (e) {
@@ -268,9 +295,9 @@ app.post('/auth/register', async (req, res) => {
 });
 
 async function issueRefreshToken(subject, role) {
-  const token = signRefresh({ sub: subject, role });
-  if (role === 'OWNER') return token;
-  await query('insert into refresh_tokens(user_id,token_hash,expires_at) values($1,$2,now()+($3::text || \' days\')::interval)', [subject, hashToken(token), REFRESH_TTL_DAYS]);
+  const tenantId=await tenantIdForUser(subject);
+  const token = signRefresh({ sub: subject, role, tenant_id: tenantId });
+  await runWithTenantContext({tenantId,userId:String(subject),role:String(role),requestId:crypto.randomUUID()},async()=>query('insert into refresh_tokens(user_id,tenant_id,token_hash,expires_at) values($1,$2,$3,now()+($4::text || \' days\')::interval)', [subject,tenantId,hashToken(token),REFRESH_TTL_DAYS]));
   return token;
 }
 
@@ -281,34 +308,36 @@ app.post('/auth/login', async (req, res) => {
   const password = String(req.body?.password || '');
   if (OWNER_LOGIN && login === OWNER_LOGIN.toLowerCase() && OWNER_PASSWORD && password === OWNER_PASSWORD) {
     const ownerId = await ensureOwnerIdentity();
-    const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' });
+    await ensureTenantForUser(ownerId, 'VÉRTICE Owner');
+    const token = signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER', tenant_id: await tenantIdForUser(ownerId) });
     return res.json({ token, refreshToken: await issueRefreshToken(ownerId, 'OWNER'), role: 'OWNER', customer: { id: ownerId, email: OWNER_LOGIN } });
   }
   try {
     const r = await query('select id,email,password_hash,country_code,locale from users where email=$1', [login]);
     const c = r.rows[0];
     if (!c || !(await bcrypt.compare(password, c.password_hash))) return errorJson(res, 401, 'Login ou senha inválidos.');
-    const token = signAccess({ sub: c.id, email: c.email, role: 'CUSTOMER' });
+    const token = signAccess({ sub: c.id, email: c.email, role: 'CUSTOMER', tenant_id: await tenantIdForUser(c.id) });
     const refreshToken = await issueRefreshToken(c.id, 'CUSTOMER');
     res.json({ token, refreshToken, role: 'CUSTOMER', customer: { id: c.id, email: c.email }, market: marketMap.get(c.country_code) || marketMap.get('BR') });
   } catch (e) { console.error('[auth/login]', e.message); return errorJson(res, 500, 'Falha de autenticação.'); }
 });
 
 app.post('/auth/refresh', async (req, res) => {
-  const token = String(req.body?.refreshToken || '');
-  if (!token) return errorJson(res, 400, 'refreshToken é obrigatório.');
-  try {
-    const payload = verifyRefresh(token);
-    if (payload.type !== 'refresh') throw new Error('invalid');
-    if (payload.role === 'OWNER') { const ownerId = await ensureOwnerIdentity(); return res.json({ token: signAccess({ sub: ownerId, email: OWNER_LOGIN, role: 'OWNER' }), refreshToken: token, role: 'OWNER' }); }
-    const found = await query('select user_id from refresh_tokens where token_hash=$1 and revoked_at is null and expires_at>now()', [hashToken(token)]);
-    if (!found.rows[0]) return errorJson(res, 401, 'Refresh token inválido ou revogado.');
-    await query('update refresh_tokens set revoked_at=now() where token_hash=$1', [hashToken(token)]);
-    const newRefresh = await issueRefreshToken(payload.sub, 'CUSTOMER');
-    const u = (await query('select id,email from users where id=$1', [payload.sub])).rows[0];
-    if (!u) return errorJson(res, 401, 'Usuário não encontrado.');
-    return res.json({ token: signAccess({ sub: u.id, email: u.email, role: 'CUSTOMER' }), refreshToken: newRefresh, role: 'CUSTOMER' });
-  } catch { return errorJson(res, 401, 'Refresh token inválido ou expirado.'); }
+  const token=String(req.body?.refreshToken||''); if(!token)return errorJson(res,400,'refreshToken é obrigatório.');
+  try{
+    const payload=verifyRefresh(token);
+    if(payload.type!=='refresh'||typeof payload.tenant_id!=='string')throw new Error('invalid');
+    return await runWithTenantContext({tenantId:String(payload.tenant_id),userId:String(payload.sub),role:String(payload.role||'CUSTOMER'),requestId:crypto.randomUUID()},async()=>{
+      const found=await query('select id,user_id,tenant_id,revoked_at,expires_at from refresh_tokens where token_hash=$1',[hashToken(token)]);
+      if(!found.rows[0])return errorJson(res,401,'Refresh token inválido ou inexistente.');
+      if(found.rows[0].revoked_at){await query('update refresh_tokens set revoked_at=coalesce(revoked_at,now()) where user_id=$1 and tenant_id=$2 and revoked_at is null',[found.rows[0].user_id,found.rows[0].tenant_id]);return errorJson(res,401,'Reuse de refresh token detectado. Sessões revogadas.','REFRESH_REUSE_DETECTED');}
+      if(new Date(found.rows[0].expires_at).getTime()<=Date.now())return errorJson(res,401,'Refresh token expirado.');
+      await query('update refresh_tokens set revoked_at=now() where id=$1',[found.rows[0].id]);
+      const u=(await query('select id,email from users where id=$1',[payload.sub])).rows[0]; if(!u)return errorJson(res,401,'Usuário não encontrado.');
+      const newRefresh=await issueRefreshToken(u.id,payload.role||'CUSTOMER');
+      return res.json({token:signAccess({sub:u.id,email:u.email,role:payload.role||'CUSTOMER',tenant_id:payload.tenant_id}),refreshToken:newRefresh,role:payload.role||'CUSTOMER'});
+    });
+  }catch{return errorJson(res,401,'Refresh token inválido ou expirado.');}
 });
 
 app.get('/me', auth, async (req, res) => {
@@ -320,20 +349,14 @@ app.get('/me', auth, async (req, res) => {
 });
 
 app.post('/devices/register', auth, async (req, res) => {
-  const id = String(req.body?.deviceId || '').trim();
-  const mode = String(req.body?.mode || '').trim();
-  const name = String(req.body?.deviceName || '').trim().slice(0,100);
-  if (!id || !['comando','operacao','monitoramento'].includes(mode)) return errorJson(res, 400, 'deviceId e mode são obrigatórios.');
-  await query('insert into devices(id,user_id,device_name,mode,last_seen_at) values($1,$2,$3,$4,now()) on conflict(id) do update set user_id=excluded.user_id,device_name=excluded.device_name,mode=excluded.mode,last_seen_at=now()', [id, req.user.sub, name, mode]);
-  res.json({ ok:true, deviceId:id, mode });
+  const id=String(req.body?.deviceId||'').trim(),mode=String(req.body?.mode||'').trim(),name=String(req.body?.deviceName||'').trim().slice(0,100);
+  if(!id||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'deviceId e mode são obrigatórios.');
+  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'device',resource:'device',operation:'create',payload:{action:'register_device',deviceId:id,deviceName:name,mode,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,deviceId:id,mode,...result});}catch{return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');}
 });
 app.post('/owner/devices/register', auth, ownerOnly, async (req, res) => {
-  const id = String(req.body?.deviceId || '').trim();
-  const mode = String(req.body?.mode || '').trim();
-  const name = String(req.body?.deviceName || '').trim().slice(0,100);
-  if (!id || !['comando','operacao','monitoramento'].includes(mode)) return errorJson(res, 400, 'deviceId e mode são obrigatórios.');
-  await query('insert into devices(id,user_id,device_name,mode,last_seen_at) values($1,$2,$3,$4,now()) on conflict(id) do update set user_id=excluded.user_id,device_name=excluded.device_name,mode=excluded.mode,last_seen_at=now()', [id, req.user.sub, name, mode]);
-  res.json({ ok:true, deviceId:id, mode });
+  const id=String(req.body?.deviceId||'').trim(),mode=String(req.body?.mode||'').trim(),name=String(req.body?.deviceName||'').trim().slice(0,100);
+  if(!id||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'deviceId e mode são obrigatórios.');
+  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'device',resource:'device',operation:'create',payload:{action:'register_device',deviceId:id,deviceName:name,mode,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,deviceId:id,mode,...result});}catch{return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');}
 });
 
 app.get('/devices', auth, async (req, res) => {
@@ -350,8 +373,8 @@ app.post('/commands', auth, async (req,res) => {
   const d=(await query('select user_id,mode from devices where id=$1',[deviceId])).rows[0];
   if(!d||d.user_id!==req.user.sub)return errorJson(res,403,'Dispositivo não pertence à conta.');
   if(mode==='operacao'&&d.mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
-  const r=await query('insert into commands(user_id,device_id,mode,command,status) values($1,$2,$3,$4,\'queued\') returning id,status',[req.user.sub,deviceId,mode,command]);
-  res.status(202).json({id:r.rows[0].id,status:r.rows[0].status,message:'Comando recebido pelo VÉRTICE.'});
+  const commandId=crypto.randomUUID();
+  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:result.status==='awaiting_mfa'?'Aguardando MFA.':'Comando recebido pelo VÉRTICE.'});}catch{return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');}
 });
 app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
   if (!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
@@ -359,13 +382,14 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
   if(!command||command.length>2000||!['comando','operacao','monitoramento'].includes(mode)||!deviceId)return errorJson(res,400,'Comando, modo ou deviceId inválido.');
   const d=(await query('select user_id,mode from devices where id=$1',[deviceId])).rows[0];
   if(!d||d.user_id!==req.user.sub)return errorJson(res,403,'Dispositivo não pertence à conta.');
-  const r=await query('insert into commands(user_id,device_id,mode,command,status) values($1,$2,$3,$4,\'queued\') returning id,status',[req.user.sub,deviceId,mode,command]);
-  res.status(202).json({id:r.rows[0].id,status:r.rows[0].status,message:'Comando recebido pelo VÉRTICE.'});
+  if(mode==='operacao'&&d.mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
+  const commandId=crypto.randomUUID();
+  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:result.status==='awaiting_mfa'?'Aguardando MFA.':'Comando recebido pelo VÉRTICE.'});}catch{return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');}
 });
 
 app.get('/commands',auth,async(req,res)=>{const cid=userId(req);if(!cid)return res.json({commands:[]});const rows=(await query('select id,device_id as "deviceId",mode,command,status,created_at as "createdAt" from commands where user_id=$1 order by created_at desc limit 50',[cid])).rows;res.json({commands:rows});});
-app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1',[deviceId])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');await query('update devices set last_seen_at=now() where id=$1',[deviceId]);const r=await query('update commands set status=\'running\',updated_at=now() where id=(select id from commands where user_id=$1 and device_id=$2 and mode=\'operacao\' and status=\'queued\' order by created_at asc for update skip locked limit 1) returning id,command,mode,status',[req.user.sub,deviceId]);res.json({ok:true,command:r.rows[0]||null});});
-app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const r=await query('update commands set status=$1,updated_at=now() where id=$2 and user_id=$3 and device_id=$4 and status=\'running\' returning status',[status,id,req.user.sub,deviceId]);if(!r.rows[0])return errorJson(res,404,'Comando não encontrado.');res.json({ok:true,status:r.rows[0].status});});
+app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1',[deviceId])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');const r=await query("select id,command,mode,status from commands where user_id=$1 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc limit 1",[req.user.sub,deviceId]);res.json({ok:true,command:r.rows[0]||null});});
+app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const owned=(await query('select id from commands where id=$1 and user_id=$2 and device_id=$3',[id,req.user.sub,deviceId])).rows[0];if(!owned)return errorJson(res,403,'Comando não pertence ao tenant/usuário.','TENANT_ISOLATION');try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'update',payload:{action:'update_command_status',commandId:id,deviceId,status,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,...result});}catch{return errorJson(res,403,'Atualização de comando rejeitada.','POLICY_DENIED');}});
 
 function plans() {
   const fallback=[{id:'basic',name:'Básico',price:99.90,description:'Acesso ao VÉRTICE para operação individual.'},{id:'pro',name:'Profissional',price:199.90,description:'Recursos ampliados para operação profissional.'},{id:'business',name:'Empresarial',price:499.90,description:'Estrutura para uso empresarial.'}];
@@ -385,11 +409,21 @@ app.post('/public/signup/checkout',async(req,res)=>{
       let found=(await client.query('select id,password_hash from users where email=$1',[email])).rows[0];
       if(found){if(!(await bcrypt.compare(password,found.password_hash)))throw Object.assign(new Error('Conta existente.'),{status:409});}
       else found=(await client.query('insert into users(email,password_hash,country_code,locale) values($1,$2,$3,$4) returning id,password_hash',[email,hash,market.countryCode,market.locale])).rows[0];
+      const tenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[found.id])).rows[0]?.tenant_id;
+      if(!tenant){
+        const t=(await client.query('insert into tenants(name) values($1) returning id',[email])).rows[0];
+        await client.query('insert into tenant_users(tenant_id,user_id,role) values($1,$2,\'OWNER\')',[t.id,found.id]);
+      }
+      const resolvedTenant=(await client.query('select app_tenant_for_user($1) as tenant_id',[found.id])).rows[0].tenant_id;
+      await client.query('select set_config($1,$2,true)',['app.tenant_id',resolvedTenant]);
+      await client.query('select set_config($1,$2,true)',['app.user_id',found.id]);
       const s=(await client.query('select id,status from subscriptions where user_id=$1 order by updated_at desc limit 1',[found.id])).rows[0];
       if(s)await client.query('update subscriptions set plan=$1,status=\'pending\',current_period_start=null,current_period_end=null,updated_at=now() where id=$2',[selected.id,s.id]);
       else await client.query('insert into subscriptions(user_id,plan,status) values($1,$2,\'pending\')',[found.id,selected.id]);
       return found;
     });
+    const tenantId=await tenantIdForUser(u.id);
+    return await runWithTenantContext({tenantId,userId:String(u.id),role:'CUSTOMER',requestId:crypto.randomUUID()},async()=>{
     const payment=(await query('insert into payments(user_id,provider,external_reference,amount,currency_code,status) values($1,$2,$3,$4,$5,\'pending\') returning id',[u.id,market.countryCode==='BR'||market.countryCode==='MX'?'mercado_pago':'stripe',null,amount,currencyCode])).rows[0];
     const ref=externalReference(u.id,payment.id);
     await query('update payments set external_reference=$1 where id=$2',[ref,payment.id]);
@@ -409,18 +443,19 @@ app.post('/public/signup/checkout',async(req,res)=>{
       const preferenceId=String(preference.id||''),checkoutUrl=String(preference.init_point||preference.sandbox_init_point||'');
       if(!preferenceId||!checkoutUrl)throw new Error('Mercado Pago não retornou a URL de checkout.');
       await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[preferenceId,checkoutUrl,payment.id]);
-      return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:currencyCode,checkoutUrl});
+      return res.status(201).json({paymentId:payment.id,provider:'mercado_pago',plan:selected.id,amount,currency:currencyCode,checkoutUrl,statusToken:issuePaymentCapability(String(payment.id),String(u.id),String(tenantId))});
     }
     const params=stripeForm({'mode':'payment','success_url':String(process.env.PUBLIC_APP_SUCCESS_URL||'https://vertice-backend-8gj5.onrender.com/payment/success'),'cancel_url':String(process.env.PUBLIC_APP_CANCEL_URL||'https://vertice-backend-8gj5.onrender.com/payment/cancel'),'line_items[0][price_data][currency]':currencyCode.toLowerCase(),'line_items[0][price_data][product_data][name]':'VÉRTICE — '+selected.name,'line_items[0][price_data][unit_amount]':String(Math.round(amount*100)),'line_items[0][quantity]':'1','metadata[payment_id]':String(payment.id),'metadata[external_reference]':ref});
     const session=await stripe('/v1/checkout/sessions',{method:'POST',body:params});
     await query('update payments set provider_order_id=$1,checkout_url=$2 where id=$3',[String(session.id),String(session.url||''),payment.id]);
-    return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url});
-  }catch(e){console.error('[checkout]',e.message, e.provider ? JSON.stringify(e.provider).slice(0,1200) : '');return errorJson(res,e.status&&e.status<500?e.status:502,e.message||'Falha ao iniciar cobrança.');}
+    return res.status(201).json({paymentId:payment.id,provider:'stripe',plan:selected.id,amount,currency:currencyCode,checkoutUrl:session.url,statusToken:issuePaymentCapability(String(payment.id),String(u.id),String(tenantId))});
+    });
+  }catch(e){safeLog('[checkout]',safeError(e));return errorJson(res,e.status&&e.status<500?e.status:502,'Falha ao iniciar cobrança.');}
 });
 
-app.get('/public/payment/status',async(req,res)=>{const id=String(req.query?.paymentId||'').trim();if(!id)return errorJson(res,400,'paymentId obrigatório.');const p=(await query('select * from payments where id=$1',[id])).rows[0];if(!p)return errorJson(res,404,'Pagamento não encontrado.');try{if(p.provider==='mercado_pago'&&p.external_reference){const found=await mercadoPago('/v1/payments/search?external_reference='+encodeURIComponent(p.external_reference));const mpPayment=Array.isArray(found?.results)?found.results.sort((a,b)=>new Date(b?.date_created||0)-new Date(a?.date_created||0))[0]:null;if(mpPayment?.id)await syncMercadoPagoPayment(String(mpPayment.id));}const fresh=(await query('select status,currency_code,amount,checkout_url from payments where id=$1',[id])).rows[0];if(fresh?.status==='paid')await query("update subscriptions set status='active',current_period_start=coalesce(current_period_start,now()),current_period_end=now()+interval '1 month',updated_at=now() where user_id=$1 and status in ('pending','active')",[p.user_id]);res.json({paymentId:id,...fresh});}catch(e){return errorJson(res,502,e.message||'Falha ao verificar pagamento.');}});
+app.get('/public/payment/status',async(req,res)=>{const capability=String(req.query?.token||'').trim();if(!capability)return errorJson(res,400,'Token de pagamento obrigatório.','PAYMENT_CAPABILITY_REQUIRED');let cap;try{cap=verifyPaymentCapability(capability);}catch{return errorJson(res,401,'Token de pagamento inválido ou expirado.','PAYMENT_CAPABILITY_INVALID');}return await runWithTenantContext({tenantId:cap.tenantId,userId:cap.userId,role:'CUSTOMER',requestId:crypto.randomUUID()},async()=>{const p=(await query('select id,user_id,tenant_id,provider,external_reference from payments where id=$1',[cap.paymentId])).rows[0];if(!p||String(p.user_id)!==cap.userId||String(p.tenant_id)!==cap.tenantId)return errorJson(res,404,'Pagamento não encontrado.');try{if(p.provider==='mercado_pago'&&p.external_reference){const found=await mercadoPago('/v1/payments/search?external_reference='+encodeURIComponent(p.external_reference));const mpPayment=Array.isArray(found?.results)?found.results.sort((a,b)=>new Date(b?.date_created||0)-new Date(a?.date_created||0))[0]:null;if(mpPayment?.id)await syncMercadoPagoPayment(String(mpPayment.id));}const fresh=(await query('select status,currency_code,amount,checkout_url from payments where id=$1',[cap.paymentId])).rows[0];res.json({paymentId:cap.paymentId,...fresh});}catch(e){return errorJson(res,502,'Falha ao verificar pagamento.');}});});
 
-app.post('/webhooks/mercadopago',async(req,res)=>{if(!validMercadoPagoWebhook(req))return errorJson(res,401,'Webhook Mercado Pago inválido.');const id=String(req.query['data.id']||req.body?.data?.id||'');if(!id)return res.json({received:true});try{await syncMercadoPagoPayment(id);return res.json({received:true});}catch(e){return errorJson(res,502,'Falha ao sincronizar Mercado Pago.');}});
+app.post('/webhooks/mercadopago',async(req,res)=>{if(!validMercadoPagoWebhook(req))return errorJson(res,401,'Webhook Mercado Pago inválido.');const id=String(req.query['data.id']||req.body?.data?.id||'');if(!id)return res.json({received:true});try{const tenantId=(await query('select app_tenant_for_payment($1,$2) as tenant_id',['mercado_pago',id])).rows[0]?.tenant_id;if(!tenantId)return res.json({received:true});const uid=(await query('select app_user_for_payment($1,$2) as user_id',['mercado_pago',id])).rows[0]?.user_id;if(!uid)return res.json({received:true});return await runWithTenantContext({tenantId:String(tenantId),userId:String(uid),role:'SYSTEM',requestId:crypto.randomUUID()},async()=>{const eventId=String(req.headers['x-request-id']||'')+':'+id;const dedupe=await query("insert into webhook_events(provider,event_id,payload,received_at) values('mercado_pago',$1,$2,now()) on conflict(provider,event_id) do nothing returning id",[eventId,JSON.stringify(req.body||{})]);if(dedupe.rowCount===0)return res.json({received:true,deduplicated:true});await syncMercadoPagoPayment(id);return res.json({received:true});});}catch(e){return errorJson(res,502,'Falha ao sincronizar Mercado Pago.');}});
 
 app.get('/sales',auth,async(req,res)=>{const m=month(req.query?.month);if(!m)return errorJson(res,400,'Mês inválido.');const rows=(await query('select id,amount,currency_code as currency,provider,status,checkout_url as "checkoutUrl",paid_at as "paidAt",created_at as "createdAt" from payments where user_id=$1 and to_char(created_at,\'YYYY-MM\')=$2 order by created_at desc limit 100',[req.user.sub,m])).rows;res.json({month:m,sales:rows});});
 app.post('/sales/orders',auth,async(req,res)=>{const product=String(req.body?.product||'').trim().slice(0,120),amount=money(req.body?.amount),market=normalizeMarket(req.body?.countryCode||'BR',req.body?.locale,req.body?.currencyCode);if(!product||!Number.isFinite(amount)||amount<=0||!market)return errorJson(res,400,'Produto, valor ou mercado inválido.');req.body={...req.body,plan:product};return res.redirect(307,'/public/signup/checkout');});
@@ -434,13 +469,17 @@ app.post('/ai/agent/chat',auth,async(req,res)=>{
   let answer='Comando recebido. Vou separar objetivo, contexto, evidências e próxima ação, preservando o que não foi solicitado.';
   if(key&&base){try{const model=process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini');const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model,temperature:0.2,messages:[{role:'system',content:'Você é o VÉRTICE, IA operacional e estratégica. Responda em português, não invente dados, diferencie fatos de hipóteses e não revele credenciais.'},{role:'user',content:message}]})},20000);answer=String(data?.choices?.[0]?.message?.content||answer).slice(0,12000);}catch(e){console.error('[ai]',e.message);}}
   if(req.user.role!=='OWNER')await query('insert into ai_conversations(user_id,mode,role,content) values($1,$2,\'user\',$3),($1,$2,\'assistant\',$4)',[req.user.sub,mode,message,answer]);
-  res.json({ok:true,answer,intent:'analysis',confidence:0.5,plan:['entender objetivo','avaliar contexto','definir próxima ação'],actions:[{type:'analyze',label:'Analisar e estruturar'}],shouldExecute:mode==='operacao',mode});
+  res.json({ok:true,answer,intent:'analysis',confidence:0.5,plan:['entender objetivo','avaliar contexto','definir próxima ação'],actions:[{type:'analyze',label:'Analisar e estruturar'}],execution:{governance:'policy_engine_required',risk:'approval',autonomy:'not_granted'},mode});
 });
 app.get('/ai/agent/history',auth,async(req,res)=>{if(req.user.role==='OWNER')return res.json({ok:true,history:[]});const rows=(await query('select role,content,mode,created_at as "createdAt" from ai_conversations where user_id=$1 order by created_at desc limit 100',[req.user.sub])).rows.reverse();res.json({ok:true,history:rows});});
 
 app.get('/admin/overview',auth,ownerOnly,async(req,res)=>{const [customers,subs,devices,commands,sales]=await Promise.all([query('select count(*)::int n from users'),query("select count(*)::int n from subscriptions where status='active'"),query('select count(*)::int n from devices'),query("select count(*)::int n from commands where created_at>=current_date"),query("select coalesce(sum(amount),0) n from payments where status='paid' and to_char(created_at,'YYYY-MM')=to_char(current_date,'YYYY-MM')")]);res.json({customers:customers.rows[0].n,activeSubscriptions:subs.rows[0].n,devices:devices.rows[0].n,commandsToday:commands.rows[0].n,salesMonth:Number(sales.rows[0].n||0)});});
 
-app.use((err,req,res,next)=>{console.error('[vertice]',err);if(res.headersSent)return next(err);return errorJson(res,500,'Erro interno do servidor.');});
+app.post('/api/v1/execution',auth,async(req,res)=>{try{const body=req.body||{};const intent={actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id||''),actorUserId:String(req.user.sub),type:String(body.type||''),resource:String(body.resource||''),operation:body.operation,payload:body.payload&&typeof body.payload==='object'?body.payload:{},idempotencyKey:String(req.headers['idempotency-key']||body.idempotencyKey||'')};if(!intent.tenantId||intent.idempotencyKey.length<16)return errorJson(res,400,'tenant_id e Idempotency-Key são obrigatórios.');const result=await enqueueExecution(intent);return res.status(result.status==='awaiting_mfa'?202:202).json({ok:true,...result});}catch(e){return errorJson(res,403,'Operação rejeitada pelo Policy Engine.','POLICY_DENIED');}});
+app.post('/api/v1/execution/:actionId/approve',auth,async(req,res)=>{if(!['OWNER','ADMIN'].includes(String(req.user.role)))return errorJson(res,403,'Aprovação administrativa necessária.');const id=String(req.params.actionId);try{const result=await withTransaction(async client=>{const task=(await client.query("select id,status,payload from tasks where id=$1 and tenant_id=$2 for update",[id,req.user.tenant_id])).rows[0];if(!task||task.status!=='awaiting_approval')throw new Error('TASK_NOT_AWAITING_APPROVAL');await client.query("update tasks set status='queued',approved_at=now(),updated_at=now() where id=$1 and tenant_id=$2",[id,req.user.tenant_id]);await client.query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) values($1,'task',$2,'execution.requested',$3,'pending',now()) on conflict do nothing",[req.user.tenant_id,id,JSON.stringify(task.payload)]);return {id,status:'queued'};});return res.json({ok:true,...result});}catch(e){return errorJson(res,409,'Ação não está aguardando aprovação.');}});
+app.post('/api/v1/mfa/enroll',auth,async(req,res)=>{if(req.user.role!=='OWNER'&&!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');try{return res.json({ok:true,...await enrollMfa(String(req.user.sub),String(req.user.tenant_id))});}catch{return errorJson(res,500,'Não foi possível preparar MFA.');}});
+app.post('/api/v1/mfa/verify',auth,async(req,res)=>{const code=String(req.body?.code||'');const taskId=String(req.body?.taskId||'');if(!/^\\d{6}$/.test(code))return errorJson(res,400,'Código MFA inválido.');try{const ok=taskId?await verifyEnabledMfa(String(req.user.sub),String(req.user.tenant_id),code):await enableMfa(String(req.user.sub),String(req.user.tenant_id),code);if(!ok)return errorJson(res,401,'Código MFA inválido.');if(taskId){const task=(await query('select id,status from tasks where id=$1 and tenant_id=$2 and user_id=$3',[taskId,req.user.tenant_id,req.user.sub])).rows[0];if(!task)return errorJson(res,404,'Tarefa não encontrada.');await query("update tasks set status='queued',mfa_verified_at=now(),updated_at=now() where id=$1 and tenant_id=$2 and status='awaiting_mfa'",[taskId,req.user.tenant_id]);await query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) select $1,'task',$2,'execution.requested',payload,'pending',now() from tasks where id=$2 and tenant_id=$1 on conflict do nothing",[req.user.tenant_id,taskId]);}return res.json({ok:true,verified:true,taskId:taskId||undefined});}catch{return errorJson(res,500,'Não foi possível validar MFA.');}});
+app.use((err,req,res,next)=>{safeLog('[vertice]',safeError(err));if(res.headersSent)return next(err);return errorJson(res,500,'Erro interno do servidor.');});
 
 async function start() {
   await waitForDatabase();

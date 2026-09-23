@@ -1,0 +1,3 @@
+import { redact } from "../security/secretVault";
+export function safeError(error: unknown):{message:string;code?:string}{const e=error instanceof Error?error:new Error(String(error));return {message:String(redact(e.message)),code:typeof (e as Error & {code?:unknown}).code==="string"?String((e as Error & {code?:unknown}).code):undefined};}
+export function safeLog(label:string,data:unknown):void{console.error(label,JSON.stringify(redact(data)));}

@@ -37,7 +37,7 @@ android {
     }
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
             val signingReady = !System.getenv("VERTICE_KEYSTORE_PATH").isNullOrBlank() &&
                 !System.getenv("VERTICE_STORE_PASSWORD").isNullOrBlank() &&
                 !System.getenv("VERTICE_KEY_PASSWORD").isNullOrBlank() &&
