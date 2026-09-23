@@ -16,8 +16,8 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
-app.get('/download/vertice.apk', async (req, res) => {
-  const apkUrl = 'https://github.com/objetivoemandamento/Vertice/releases/download/android-149/app-release.apk';
+app.get(['/download-apk','/download/vertice.apk'], async (req, res) => {
+  const apkUrl = 'https://github.com/objetivoemandamento/Vertice/releases/download/android-172/app-release.apk';
   try {
     const response = await fetch(apkUrl, { redirect: 'follow' });
     if (!response.ok || !response.body) return errorJson(res, 502, 'APK indisponível no momento.');
