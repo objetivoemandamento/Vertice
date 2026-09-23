@@ -16,7 +16,6 @@
     "express-rate-limit": "^8.2.1",
     "ioredis": "^5.8.0",
     "rate-limit-redis": "^4.2.1",
-    "zod": "^4.1.5",
-    "tsx": "^4.20.5"
+    "zod": "^4.1.5"
   }
 }
