@@ -24,6 +24,27 @@ jobs:
       - uses: actions/checkout@v6
       - name: Validate server JavaScript
         run: node --check server/src/server.js
+      - name: Production HTTP load smoke
+        run: |
+          node <<'NODE'
+          const {performance}=require('node:perf_hooks');
+          const url='https://vertice-backend-8gj5.onrender.com/health';
+          const concurrency=20, perWorker=10, timeoutMs=15000;
+          const out=[];
+          async function one(){
+            const t=performance.now(), c=new AbortController(), timer=setTimeout(()=>c.abort(),timeoutMs);
+            try{const r=await fetch(url,{signal:c.signal,headers:{'user-agent':'vertice-ci-load-audit/1.0'}}); await r.arrayBuffer(); out.push({status:r.status,ms:performance.now()-t});}
+            catch(e){out.push({status:'ERR',ms:performance.now()-t,error:String(e)});}
+            finally{clearTimeout(timer);}
+          }
+          async function worker(){for(let i=0;i<perWorker;i++)await one();}
+          const t0=performance.now(); await Promise.all(Array.from({length:concurrency},worker));
+          const lat=out.map(x=>x.ms).sort((a,b)=>a-b), bad=out.filter(x=>x.status==='ERR'||x.status>=500);
+          const p=q=>lat[Math.min(lat.length-1,Math.floor(q*(lat.length-1)))];
+          const s={requests:out.length,concurrency,bad:bad.length,avg_ms:lat.reduce((a,b)=>a+b,0)/lat.length,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1),statuses:Object.fromEntries([...new Set(out.map(x=>x.status))].map(v=>[v,out.filter(x=>x.status===v).length]))};
+          console.log(JSON.stringify(s,null,2));
+          if(bad.length)process.exit(1);
+          NODE
       - name: Validate server package JSON
         run: node -e "const p=require('./server/package.json'); JSON.parse(require('fs').readFileSync('server/package.json','utf8')); if(!p.engines?.node) process.exit(1); console.log('server/package.json OK; Node:',p.engines.node)"
       - name: Validate server dependency installation
