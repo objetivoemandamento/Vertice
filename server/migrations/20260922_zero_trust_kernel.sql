@@ -64,34 +64,34 @@ alter table monthly_sales alter column tenant_id set not null;
 alter table ai_conversations alter column tenant_id set not null;
 alter table refresh_tokens alter column tenant_id set not null;
 
-do $$ begin
+do $vertice$ begin
   alter table companies add constraint fk_companies_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table subscriptions add constraint fk_subscriptions_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table payments add constraint fk_payments_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table devices add constraint fk_devices_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table commands add constraint fk_commands_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table analyses add constraint fk_analyses_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table history add constraint fk_history_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table monthly_sales add constraint fk_monthly_sales_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table ai_conversations add constraint fk_ai_conversations_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
-do $$ begin
+do $vertice$ begin
   alter table refresh_tokens add constraint fk_refresh_tokens_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
 exception when duplicate_object then null; end $vertice$;
 
