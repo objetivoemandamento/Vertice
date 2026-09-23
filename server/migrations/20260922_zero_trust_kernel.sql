@@ -66,34 +66,34 @@ alter table refresh_tokens alter column tenant_id set not null;
 
 do $$ begin
   alter table companies add constraint fk_companies_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table subscriptions add constraint fk_subscriptions_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table payments add constraint fk_payments_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table devices add constraint fk_devices_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table commands add constraint fk_commands_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table analyses add constraint fk_analyses_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table history add constraint fk_history_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table monthly_sales add constraint fk_monthly_sales_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table ai_conversations add constraint fk_ai_conversations_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 do $$ begin
   alter table refresh_tokens add constraint fk_refresh_tokens_tenant foreign key(tenant_id) references tenants(id) on delete cascade;
-exception when duplicate_object then null; end $$;
+exception when duplicate_object then null; end $vertice$;
 
 create table if not exists tasks (
   id uuid primary key,
@@ -125,7 +125,7 @@ create table if not exists audit_logs (
 );
 
 create or replace function deny_audit_mutation() returns trigger language plpgsql as $vertice$
-begin raise exception 'AUDIT_LOG_IMMUTABLE'; end $$;
+begin raise exception 'AUDIT_LOG_IMMUTABLE'; end $vertice$;
 
 drop trigger if exists audit_logs_no_update on audit_logs;
 create trigger audit_logs_no_update before update or delete on audit_logs for each row execute function deny_audit_mutation();
@@ -189,7 +189,7 @@ begin
   if new.tenant_id is not null and new.tenant_id <> resolved then raise exception 'TENANT_MISMATCH'; end if;
   new.tenant_id := resolved;
   return new;
-end $$;
+end $vertice$;
 
 create or replace function enforce_owner_tenant() returns trigger language plpgsql security definer set search_path=public as $vertice$
 declare resolved uuid;
@@ -199,7 +199,7 @@ begin
   if new.tenant_id is not null and new.tenant_id <> resolved then raise exception 'TENANT_MISMATCH'; end if;
   new.tenant_id := resolved;
   return new;
-end $$;
+end $vertice$;
 
 drop trigger if exists trg_companies_tenant on companies;
 create trigger trg_companies_tenant before insert or update of owner_user_id,tenant_id on companies for each row execute function enforce_owner_tenant();
@@ -269,6 +269,6 @@ do $$ declare t text; begin
     execute format('drop policy if exists vertice_tenant_isolation on %I',t);
     execute format('create policy vertice_tenant_isolation on %I for all to public using (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id)) with check (tenant_id = app_current_tenant() and app_is_tenant_member(tenant_id))',t);
   end loop;
-end $$;
+end $vertice$;
 
 commit;
