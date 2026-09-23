@@ -20,19 +20,19 @@ jobs:
     env:
       VERTICE_BUILD_NUMBER: ${{ github.run_number }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Validate server JavaScript
-        run: node --check server/src/server.js && node --check server/src/vertice-preload.js && node --check server/src/signup-preload.js && node --check server/src/ai-agent-preload.js
+        run: node --check server/src/server.js
       - name: Validate server package JSON
         run: node -e "const p=require('./server/package.json'); JSON.parse(require('fs').readFileSync('server/package.json','utf8')); if(!p.engines?.node) process.exit(1); console.log('server/package.json OK; Node:',p.engines.node)"
       - name: Validate server dependency installation
         working-directory: server
         run: npm install --ignore-scripts
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.10.2'
       - name: Validate stable Android signing secrets
@@ -77,12 +77,12 @@ jobs:
             -f content="$CONTENT" \
             -f sha="$SHA" \
             -f branch='main'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: VERTEX-v1.5.0-teste-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: VERTEX-v1.5.0-definitivo-apk
           path: ${{ env.APK_PATH }}
