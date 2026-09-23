@@ -246,13 +246,13 @@ create or replace function app_current_user() returns uuid language sql stable a
   select nullif(current_setting('app.user_id', true),'')::uuid
 $$;
 
-create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $
+create or replace function app_is_tenant_member(target uuid) returns boolean language sql stable security definer set search_path=public as $vertice$
   select exists(select 1 from tenant_users tu where tu.tenant_id=target and tu.user_id=app_current_user())
-$;
+$vertice$;
 
-create or replace function app_tenant_for_user(target uuid) returns uuid language sql stable security definer set search_path=public as $
+create or replace function app_tenant_for_user(target uuid) returns uuid language sql stable security definer set search_path=public as $vertice$
   select tenant_id from tenant_users where user_id=target order by created_at asc limit 1
-$;
+$vertice$;
 
 drop policy if exists vertice_tenant_isolation on tenants;
 create policy vertice_tenant_isolation on tenants for all to public
