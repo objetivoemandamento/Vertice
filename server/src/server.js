@@ -121,6 +121,40 @@ function ownerOnly(req, res, next) {
 }
 const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
 
+async function registerOwnerDeviceNow({tenantId,userId,deviceId,mode,deviceName}) {
+  const { evaluatePolicy } = require('./security/policyEngine');
+  const intent = {
+    actionId: crypto.randomUUID(),
+    tenantId: String(tenantId),
+    actorUserId: String(userId),
+    type: 'device',
+    resource: 'device',
+    operation: 'create',
+    payload: {
+      action: 'register_device',
+      deviceId: String(deviceId),
+      deviceName: String(deviceName || ''),
+      mode: String(mode),
+      userId: String(userId)
+    },
+    idempotencyKey: 'device-register-' + String(deviceId)
+  };
+  const decision = evaluatePolicy(intent);
+  if (!decision.allowed) throw new Error('POLICY_DENIED:' + decision.reason);
+  await query(
+    `insert into devices(id,user_id,device_name,mode,last_seen_at)
+     values($1,$2,$3,$4,now())
+     on conflict(id) do update
+       set user_id=excluded.user_id,
+           device_name=excluded.device_name,
+           mode=excluded.mode,
+           last_seen_at=now()`,
+    [String(deviceId), String(userId), String(deviceName || ''), String(mode)]
+  );
+  return { deviceId: String(deviceId), mode: String(mode), status: 'registered' };
+}
+
+
 async function ensureOwnerIdentity() {
   const existing = (await query('select id from users where email=$1', [OWNER_SYSTEM_EMAIL])).rows[0];
   if (existing?.id) {
@@ -356,7 +390,19 @@ app.post('/devices/register', auth, async (req, res) => {
 app.post('/owner/devices/register', auth, ownerOnly, async (req, res) => {
   const id=String(req.body?.deviceId||'').trim(),mode=String(req.body?.mode||'').trim(),name=String(req.body?.deviceName||'').trim().slice(0,100);
   if(!id||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'deviceId e mode são obrigatórios.');
-  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'device',resource:'device',operation:'create',payload:{action:'register_device',deviceId:id,deviceName:name,mode,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,deviceId:id,mode,...result});}catch{return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');}
+  try {
+    const result=await registerOwnerDeviceNow({
+      tenantId:req.user.tenant_id,
+      userId:req.user.sub,
+      deviceId:id,
+      mode,
+      deviceName:name
+    });
+    return res.status(200).json({ok:true,...result});
+  } catch(e) {
+    console.error('[owner/device-register]', e.message);
+    return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');
+  }
 });
 
 app.get('/devices', auth, async (req, res) => {
@@ -370,11 +416,11 @@ app.post('/commands', auth, async (req,res) => {
   if (!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
   const command=String(req.body?.command||'').trim(), mode=String(req.body?.mode||''), deviceId=String(req.body?.deviceId||'').trim();
   if(!command||command.length>2000||!['comando','operacao','monitoramento'].includes(mode)||!deviceId)return errorJson(res,400,'Comando, modo ou deviceId inválido.');
-  const d=(await query('select user_id,mode from devices where id=$1',[deviceId])).rows[0];
+  const d=(await query('select user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,req.user.tenant_id])).rows[0];
   if(!d||d.user_id!==req.user.sub)return errorJson(res,403,'Dispositivo não pertence à conta.');
   if(mode==='operacao'&&d.mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
   const commandId=crypto.randomUUID();
-  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:result.status==='awaiting_mfa'?'Aguardando MFA.':'Comando recebido pelo VÉRTICE.'});}catch{return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');}
+  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub),role:String(req.user.role)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:result.status==='awaiting_mfa'?'Aguardando MFA.':'Comando recebido pelo VÉRTICE.'});}catch{return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');}
 });
 app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
   if (!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
@@ -388,8 +434,8 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
 });
 
 app.get('/commands',auth,async(req,res)=>{const cid=userId(req);if(!cid)return res.json({commands:[]});const rows=(await query('select id,device_id as "deviceId",mode,command,status,created_at as "createdAt" from commands where user_id=$1 order by created_at desc limit 50',[cid])).rows;res.json({commands:rows});});
-app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1',[deviceId])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');const r=await query("select id,command,mode,status from commands where user_id=$1 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc limit 1",[req.user.sub,deviceId]);res.json({ok:true,command:r.rows[0]||null});});
-app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const owned=(await query('select id from commands where id=$1 and user_id=$2 and device_id=$3',[id,req.user.sub,deviceId])).rows[0];if(!owned)return errorJson(res,403,'Comando não pertence ao tenant/usuário.','TENANT_ISOLATION');try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'update',payload:{action:'update_command_status',commandId:id,deviceId,status,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,...result});}catch{return errorJson(res,403,'Atualização de comando rejeitada.','POLICY_DENIED');}});
+app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,req.user.tenant_id])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');const r=await query("select id,command,mode,status from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc limit 1",[req.user.sub,deviceId,req.user.tenant_id]);res.json({ok:true,command:r.rows[0]||null});});
+app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const owned=(await query('select id from commands where id=$1 and user_id=$2 and tenant_id=$4 and device_id=$3',[id,req.user.sub,deviceId,req.user.tenant_id])).rows[0];if(!owned)return errorJson(res,403,'Comando não pertence ao tenant/usuário.','TENANT_ISOLATION');try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'update',payload:{action:'update_command_status',commandId:id,deviceId,status,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,...result});}catch{return errorJson(res,403,'Atualização de comando rejeitada.','POLICY_DENIED');}});
 
 function plans() {
   const fallback=[{id:'basic',name:'Básico',price:99.90,description:'Acesso ao VÉRTICE para operação individual.'},{id:'pro',name:'Profissional',price:199.90,description:'Recursos ampliados para operação profissional.'},{id:'business',name:'Empresarial',price:499.90,description:'Estrutura para uso empresarial.'}];
