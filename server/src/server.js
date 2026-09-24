@@ -460,16 +460,163 @@ app.post('/webhooks/mercadopago',async(req,res)=>{if(!validMercadoPagoWebhook(re
 app.get('/sales',auth,async(req,res)=>{const m=month(req.query?.month);if(!m)return errorJson(res,400,'Mês inválido.');const rows=(await query('select id,amount,currency_code as currency,provider,status,checkout_url as "checkoutUrl",paid_at as "paidAt",created_at as "createdAt" from payments where user_id=$1 and to_char(created_at,\'YYYY-MM\')=$2 order by created_at desc limit 100',[req.user.sub,m])).rows;res.json({month:m,sales:rows});});
 app.post('/sales/orders',auth,async(req,res)=>{const product=String(req.body?.product||'').trim().slice(0,120),amount=money(req.body?.amount),market=normalizeMarket(req.body?.countryCode||'BR',req.body?.locale,req.body?.currencyCode);if(!product||!Number.isFinite(amount)||amount<=0||!market)return errorJson(res,400,'Produto, valor ou mercado inválido.');req.body={...req.body,plan:product};return res.redirect(307,'/public/signup/checkout');});
 
-app.post('/ai/agent/chat',auth,async(req,res)=>{
-  if(req.user.role!=='OWNER'&&!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');
-  const message=String(req.body?.message||'').trim().slice(0,6000),mode=String(req.body?.mode||'');
-  if(!message||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'Mensagem ou modo inválido.');
-  const key=String(process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'');
-  const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');
-  let answer='Comando recebido. Vou separar objetivo, contexto, evidências e próxima ação, preservando o que não foi solicitado.';
-  if(key&&base){try{const model=process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini');const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model,temperature:0.2,messages:[{role:'system',content:'Você é o VÉRTICE, IA operacional e estratégica. Responda em português, não invente dados, diferencie fatos de hipóteses e não revele credenciais.'},{role:'user',content:message}]})},20000);answer=String(data?.choices?.[0]?.message?.content||answer).slice(0,12000);}catch(e){console.error('[ai]',e.message);}}
-  if(req.user.role!=='OWNER')await query('insert into ai_conversations(user_id,mode,role,content) values($1,$2,\'user\',$3),($1,$2,\'assistant\',$4)',[req.user.sub,mode,message,answer]);
-  res.json({ok:true,answer,intent:'analysis',confidence:0.5,plan:['entender objetivo','avaliar contexto','definir próxima ação'],actions:[{type:'analyze',label:'Analisar e estruturar'}],execution:{governance:'policy_engine_required',risk:'approval',autonomy:'not_granted'},mode});
+app.post('/ai/agent/chat', auth, async (req, res) => {
+  if (req.user.role !== 'OWNER' && !(await activeSubscription(req.user.sub))) {
+    return errorJson(res, 402, 'Assinatura não está ativa.');
+  }
+
+  const message = String(req.body?.message || '').trim().slice(0, 6000);
+  const mode = String(req.body?.mode || '').trim();
+
+  if (!message || !['comando', 'operacao', 'monitoramento'].includes(mode)) {
+    return errorJson(res, 400, 'Mensagem ou modo inválido.');
+  }
+
+  const key = String(
+    process.env.VERTICE_AI_API_KEY ||
+    process.env.GROQ_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    ''
+  );
+
+  const base = String(
+    process.env.VERTICE_AI_BASE_URL ||
+    (process.env.GROQ_API_KEY
+      ? 'https://api.groq.com/openai/v1'
+      : process.env.OPENAI_API_KEY
+        ? 'https://api.openai.com/v1'
+        : '')
+  ).replace(/\/$/, '');
+
+  const systemInstruction = `
+Você é o orquestrador operacional VÉRTICE.
+
+DIRETRIZ DE EXECUÇÃO:
+- Não exija que o usuário forneça previamente Objetivo, Contexto ou Evidências.
+- Interprete diretamente o comando recebido.
+- Identifique a ação solicitada e produza uma intenção operacional estruturada.
+- Não responda que "nenhuma execução foi autorizada pela IA".
+- Quando o pedido representar uma ação operacional válida, retorne uma intenção executável.
+- A autorização técnica final continua pertencendo ao backend VÉRTICE e ao Policy Engine.
+- Nunca invente credenciais, tokens ou dados.
+- Nunca revele segredos.
+- Retorne JSON válido.
+
+Formato:
+{
+  "intent": "execute",
+  "command": "comando original normalizado",
+  "reason": "descrição curta da ação",
+  "shouldExecute": true
+}
+`;
+
+  let aiResult = {
+    intent: 'execute',
+    command: message,
+    reason: 'Comando recebido pelo VÉRTICE.',
+    shouldExecute: true
+  };
+
+  if (key && base) {
+    try {
+      const model =
+        process.env.VERTICE_AI_MODEL ||
+        (process.env.GROQ_API_KEY
+          ? 'llama-3.3-70b-versatile'
+          : 'gpt-4o-mini');
+
+      const data = await providerFetch(
+        base,
+        '/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer ' + key
+          },
+          body: JSON.stringify({
+            model,
+            temperature: 0,
+            messages: [
+              {
+                role: 'system',
+                content: systemInstruction
+              },
+              {
+                role: 'user',
+                content: message
+              }
+            ],
+            response_format: {
+              type: 'json_object'
+            }
+          })
+        },
+        20000
+      );
+
+      const raw = String(
+        data?.choices?.[0]?.message?.content || ''
+      );
+
+      try {
+        const parsed = JSON.parse(raw);
+
+        if (parsed && typeof parsed === 'object') {
+          aiResult = {
+            intent: 'execute',
+            command: String(parsed.command || message).slice(0, 2000),
+            reason: String(
+              parsed.reason || 'Comando recebido pelo VÉRTICE.'
+            ).slice(0, 1000),
+            shouldExecute: parsed.shouldExecute !== false
+          };
+        }
+      } catch {
+        // Preserva o comando original se o modelo não retornar JSON válido.
+      }
+    } catch (e) {
+      console.error('[ai]', e.message);
+    }
+  }
+
+  if (req.user.role !== 'OWNER') {
+    await query(
+      `insert into ai_conversations
+       (user_id, mode, role, content)
+       values
+       ($1, $2, 'user', $3),
+       ($1, $2, 'assistant', $4)`,
+      [
+        req.user.sub,
+        mode,
+        message,
+        JSON.stringify(aiResult)
+      ]
+    );
+  }
+
+  return res.json({
+    ok: true,
+    answer: aiResult.reason,
+    intent: aiResult.intent,
+    confidence: 1,
+    command: aiResult.command,
+    shouldExecute: aiResult.shouldExecute,
+    actions: [
+      {
+        type: 'execute',
+        label: 'Executar comando'
+      }
+    ],
+    execution: {
+      governance: 'backend_policy_engine',
+      risk: 'backend_controlled',
+      autonomy: 'command_requested'
+    },
+    mode
+  });
 });
 app.get('/ai/agent/history',auth,async(req,res)=>{if(req.user.role==='OWNER')return res.json({ok:true,history:[]});const rows=(await query('select role,content,mode,created_at as "createdAt" from ai_conversations where user_id=$1 order by created_at desc limit 100',[req.user.sub])).rows.reverse();res.json({ok:true,history:rows});});
 
