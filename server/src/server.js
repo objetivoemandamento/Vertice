@@ -455,34 +455,41 @@ app.get('/commands/next',auth,async(req,res)=>{
   if(!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
   const deviceId=String(req.query?.deviceId||'').trim();
   if(await tenantEmergencyStopped(req.user.tenant_id)) return res.json({ok:true,command:null,blocked:true});
-  const r=await withTransaction(async client=>{
-    const d=(await client.query('select id,user_id,mode from devices where id=$1 and tenant_id=$2 for update',[deviceId,req.user.tenant_id])).rows[0];
-    if(!d||String(d.user_id)!==String(req.user.sub)||d.mode!=='operacao') throw Object.assign(new Error('DEVICE_NOT_OWNED'),{status:403});
-    return (await client.query(
-      "update commands set status='dispatched',updated_at=now() where id=(select id from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc for update skip locked limit 1) returning id,command,mode,status",
-      [req.user.sub,deviceId,req.user.tenant_id]
-    )).rows[0]||null;
-    if(r) await client.query("insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,'dispatched')",[req.user.tenant_id,req.user.sub,r.id]);
-    return r;
-  }).catch(e=>{if(e.status===403)throw e;throw e;});
-  return res.json({ok:true,command:r||null});
+  try{
+    const command=await withTransaction(async client=>{
+      const d=(await client.query('select id,user_id,mode from devices where id=$1 and tenant_id=$2 for update',[deviceId,req.user.tenant_id])).rows[0];
+      if(!d||String(d.user_id)!==String(req.user.sub)||d.mode!=='operacao') throw Object.assign(new Error('DEVICE_NOT_OWNED'),{status:403});
+      const row=(await client.query(
+        "update commands set status='dispatched',updated_at=now() where id=(select id from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc for update skip locked limit 1) returning id,command,mode,status",
+        [req.user.sub,deviceId,req.user.tenant_id]
+      )).rows[0]||null;
+      if(row) await client.query("insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,'dispatched')",[req.user.tenant_id,req.user.sub,row.id]);
+      return row;
+    });
+    return res.json({ok:true,command});
+  }catch(e){
+    return errorJson(res,e.status||500,e.status===403?'Terminal OPERAÇÃO não autorizado.':'Não foi possível reservar o comando.');
+  }
 });
 app.post('/commands/:commandId/status',auth,async(req,res)=>{
   if(!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
   const id=String(req.params.commandId),next=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'').trim();
   if(!['executing','succeeded','failed','cancelled'].includes(next)||!deviceId) return errorJson(res,400,'Status ou deviceId inválido.');
-  const result=await withTransaction(async client=>{
-    const row=(await client.query('select status from commands where id=$1 and user_id=$2 and tenant_id=$3 and device_id=$4 for update',[id,req.user.sub,req.user.tenant_id,deviceId])).rows[0];
-    if(!row) throw Object.assign(new Error('TENANT_ISOLATION'),{status:403});
-    const current=String(row.status);
-    const valid=(next==='executing'&&current==='dispatched') ||
-      (['succeeded','failed','cancelled'].includes(next)&&['dispatched','executing'].includes(current));
-    if(!valid) throw Object.assign(new Error('INVALID_COMMAND_TRANSITION'),{status:409});
-    await client.query('update commands set status=$1,updated_at=now() where id=$2',[next,id]);
-    await client.query('insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,$4)',[req.user.tenant_id,req.user.sub,id,next]);
-    return next;
-  }).catch(e=>{if(e.status)throw e;throw e;});
-  return res.json({ok:true,id,status:result});
+  try{
+    const status=await withTransaction(async client=>{
+      const row=(await client.query('select status from commands where id=$1 and user_id=$2 and tenant_id=$3 and device_id=$4 for update',[id,req.user.sub,req.user.tenant_id,deviceId])).rows[0];
+      if(!row) throw Object.assign(new Error('TENANT_ISOLATION'),{status:403});
+      const current=String(row.status);
+      const valid=(next==='executing'&&current==='dispatched')||(['succeeded','failed','cancelled'].includes(next)&&['dispatched','executing'].includes(current));
+      if(!valid) throw Object.assign(new Error('INVALID_COMMAND_TRANSITION'),{status:409});
+      await client.query('update commands set status=$1,updated_at=now() where id=$2',[next,id]);
+      await client.query('insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,$4)',[req.user.tenant_id,req.user.sub,id,next]);
+      return next;
+    });
+    return res.json({ok:true,id,status});
+  }catch(e){
+    return errorJson(res,e.status||500,e.status===403?'Comando não pertence ao tenant/usuário.':e.status===409?'Transição de comando inválida.':'Falha ao atualizar comando.');
+  }
 });
 
 function plans() {
