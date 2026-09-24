@@ -13,8 +13,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
       - name: Install backend
         working-directory: server
         run: npm ci --ignore-scripts
