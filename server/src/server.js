@@ -462,6 +462,8 @@ app.get('/commands/next',auth,async(req,res)=>{
       "update commands set status='dispatched',updated_at=now() where id=(select id from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc for update skip locked limit 1) returning id,command,mode,status",
       [req.user.sub,deviceId,req.user.tenant_id]
     )).rows[0]||null;
+    if(r) await client.query("insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,'dispatched')",[req.user.tenant_id,req.user.sub,r.id]);
+    return r;
   }).catch(e=>{if(e.status===403)throw e;throw e;});
   return res.json({ok:true,command:r||null});
 });
@@ -477,6 +479,7 @@ app.post('/commands/:commandId/status',auth,async(req,res)=>{
       (['succeeded','failed','cancelled'].includes(next)&&['dispatched','executing'].includes(current));
     if(!valid) throw Object.assign(new Error('INVALID_COMMAND_TRANSITION'),{status:409});
     await client.query('update commands set status=$1,updated_at=now() where id=$2',[next,id]);
+    await client.query('insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,$4)',[req.user.tenant_id,req.user.sub,id,next]);
     return next;
   }).catch(e=>{if(e.status)throw e;throw e;});
   return res.json({ok:true,id,status:result});
