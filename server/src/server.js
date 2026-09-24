@@ -695,8 +695,31 @@ app.use((err,req,res,next)=>{safeLog('[vertice]',safeError(err));if(res.headersS
 
 async function start() {
   await waitForDatabase();
+
+  let embeddedWorker = null;
+  let outboxTimer = null;
+
+  if (NODE_ENV === 'production' && process.env.VERTICE_EMBED_WORKER !== 'false') {
+    const workerModule = await import('./queue/executionWorker.ts');
+    const outboxModule = await import('./outbox/publisher.ts');
+    embeddedWorker = workerModule.executionWorker;
+    outboxTimer = setInterval(() => {
+      outboxModule.publishPendingOutbox(100).catch(error =>
+        console.error('[vertice-outbox]', error instanceof Error ? error.message : 'publish failed')
+      );
+    }, 1000);
+    console.log('[vertice] embedded execution worker started');
+  }
+
   const server=app.listen(PORT,()=>console.log('VÉRTICE backend ouvindo na porta '+PORT));
-  const shutdown=async(signal)=>{console.log('[vertice] '+signal);server.close(async()=>{try{await closeDatabase();}finally{process.exit(0);}});};
+  const shutdown=async(signal)=>{
+    console.log('[vertice] '+signal);
+    if (outboxTimer) clearInterval(outboxTimer);
+    try { if (embeddedWorker) await embeddedWorker.close(); }
+    finally {
+      server.close(async()=>{try{await closeDatabase();}finally{process.exit(0);}});
+    }
+  };
   process.once('SIGTERM',()=>shutdown('SIGTERM'));process.once('SIGINT',()=>shutdown('SIGINT'));
 }
 start().catch(err=>{console.error('[vertice] startup failed:',err.message);process.exit(1);});
