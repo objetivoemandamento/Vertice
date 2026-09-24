@@ -108,7 +108,8 @@ class OperationAccessibilityService : AccessibilityService() {
             results += result.second
             if (!result.first) return false to "Passo ${index + 1} falhou: ${result.second}"
             if (index < steps.lastIndex) {
-                waitForUiProgress(token, before, 2500L, expectedGeneration)
+                if (!waitForUiProgress(token, before, 2500L, expectedGeneration))
+                    return false to "O estado da interface não confirmou progresso após o passo ${index + 1}."
                 if (!canContinue(token, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
                 delay(350L)
             }
@@ -215,7 +216,7 @@ class OperationAccessibilityService : AccessibilityService() {
         return tapNodeCenter(node)
     }
 
-    private fun longClickByText(label: String): Boolean {
+    private suspend fun longClickByText(label: String): Boolean {
         if (EmergencyState.isStopped(this)) return false
         val needle = normalize(label); val nodes = mutableListOf<AccessibilityNodeInfo>(); collectNodes(rootInActiveWindow, nodes)
         val node = nodes.firstOrNull { normalize(it.text?.toString().orEmpty()).contains(needle) } ?: return false
