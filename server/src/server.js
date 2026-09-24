@@ -449,7 +449,10 @@ app.post('/security/emergency-stop',auth,ownerOnly,async(req,res)=>{
   await withTransaction(async client=>{
     await client.query('select id from tenants where id=$1 for update',[req.user.tenant_id]);
     await client.query('update tenants set emergency_stop=$1,updated_at=now() where id=$2',[stopped,req.user.tenant_id]);
-    if(stopped) await client.query("update commands set status='cancelled',updated_at=now() where tenant_id=$1 and status in ('created','validated','authorized','queued','dispatched')",[req.user.tenant_id]);
+    if(stopped){
+      const cancelled=(await client.query("update commands set status='cancelled',updated_at=now() where tenant_id=$1 and status in ('created','validated','authorized','queued','dispatched') returning id,user_id",[req.user.tenant_id])).rows;
+      for(const row of cancelled) await client.query("insert into command_events(tenant_id,user_id,command_id,status,metadata) values($1,$2,$3,'cancelled',$4)",[req.user.tenant_id,row.user_id,row.id,JSON.stringify({reason:'EMERGENCY_STOP'})]);
+    }
   });
   res.json({ok:true,stopped});
 });
@@ -462,7 +465,7 @@ app.get('/commands/next',auth,async(req,res)=>{
   try{
     const command=await withTransaction(async client=>{
       const tenant=(await client.query('select emergency_stop from tenants where id=$1 for update',[req.user.tenant_id])).rows[0];
-      if(!tenant)return errorJson(res,403,'Tenant não encontrado.','TENANT_ISOLATION');
+      if(!tenant)throw Object.assign(new Error('TENANT_ISOLATION'),{status:403});
       if(tenant.emergency_stop)return null;
       const d=(await client.query('select id,user_id,tenant_id,mode from devices where id=$1 for update',[deviceId])).rows[0];
       if(!d||String(d.tenant_id)!==String(req.user.tenant_id)||String(d.user_id)!==String(req.user.sub)||d.mode!=='operacao') throw Object.assign(new Error('DEVICE_NOT_OWNED'),{status:403});
