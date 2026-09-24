@@ -1,4 +1,5 @@
 name: VÉRTICE Quality Gate
+# Pull-request validation only; release publishing remains on the production workflow.
 
 on:
   pull_request:
