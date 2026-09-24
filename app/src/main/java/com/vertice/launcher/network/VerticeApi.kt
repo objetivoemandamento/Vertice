@@ -61,7 +61,7 @@ data class AuthResult(val token:String,val customerId:String,val email:String,va
 data class PlanInfo(val id:String,val name:String,val price:Double,val description:String)
 data class SignupCheckout(val signupId:String,val signupToken:String,val plan:String,val amount:Double,val checkoutUrl:String)
 data class SignupStatus(val status:String,val token:String?,val customerId:String?,val email:String?,val plan:String)
-data class AiReply(val answer:String,val actions:List<String>,val shouldExecute:Boolean)
+data class AiReply(val answer:String,val actions:List<String>,val command:String,val shouldExecute:Boolean)
 data class AiHistoryItem(val role:String,val content:String,val mode:String,val createdAt:String)
 data class SubscriptionStatus(val plan:String,val status:String,val currentPeriodEnd:String)
 data class CommandResult(val id:String,val status:String,val message:String)
