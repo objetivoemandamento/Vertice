@@ -435,7 +435,6 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
     if(String(d.user_id)!==String(req.user.sub) || String(d.mode)!==mode) {
       await query('update devices set user_id=$1,mode=$2,last_seen_at=now() where id=$3',[String(req.user.sub),mode,deviceId]);
     }
-    if(mode==='operacao' && mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
     const commandId=crypto.randomUUID();
     const result=await enqueueExecution({
       actionId:crypto.randomUUID(),
