@@ -1,4 +1,5 @@
 name: vertice-security-staging
+# Execution permission audit: staging runs the full operational migration chain.
 on:
   push:
     branches: ["feat/zero-trust-kernel-v2","main"]
