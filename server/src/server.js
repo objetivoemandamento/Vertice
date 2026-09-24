@@ -124,37 +124,27 @@ const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
 async function registerDeviceNow({tenantId,userId,deviceId,mode,deviceName,allowRebind=false}) {
   const { evaluatePolicy } = require('./security/policyEngine');
   const intent = {
-    actionId: crypto.randomUUID(),
-    tenantId: String(tenantId),
-    actorUserId: String(userId),
-    type: 'device',
-    resource: 'device',
-    operation: 'create',
-    payload: {
-      action: 'register_device',
-      deviceId: String(deviceId),
-      deviceName: String(deviceName || ''),
-      mode: String(mode),
-      userId: String(userId)
-    },
+    actionId: crypto.randomUUID(), tenantId: String(tenantId), actorUserId: String(userId),
+    type: 'device', resource: 'device', operation: 'create',
+    payload: { action:'register_device', deviceId:String(deviceId), deviceName:String(deviceName||''), mode:String(mode), userId:String(userId) },
     idempotencyKey: 'device-register-' + String(deviceId)
   };
-  const decision = evaluatePolicy(intent);
-  if (!decision.allowed) throw new Error('POLICY_DENIED:' + decision.reason);
-  const existing=(await query('select tenant_id from devices where id=$1',[String(deviceId)])).rows[0];
-  if(existing && String(existing.tenant_id)!==String(tenantId)) throw new Error('DEVICE_CROSS_TENANT');
-  if(existing && String(existing.user_id || '')!==String(userId) && !allowRebind) throw new Error('DEVICE_NOT_OWNED');
-  await query(
-    `insert into devices(id,user_id,device_name,mode,last_seen_at)
-     values($1,$2,$3,$4,now())
-     on conflict(id) do update
-       set user_id=excluded.user_id,
-           device_name=excluded.device_name,
-           mode=excluded.mode,
-           last_seen_at=now()`,
-    [String(deviceId), String(userId), String(deviceName || ''), String(mode)]
-  );
-  return { deviceId: String(deviceId), mode: String(mode), status: 'registered' };
+  if (!evaluatePolicy(intent).allowed) throw new Error('POLICY_DENIED');
+  return withTransaction(async client => {
+    const existing=(await client.query('select tenant_id,user_id from devices where id=$1 for update',[String(deviceId)])).rows[0];
+    if(existing && String(existing.tenant_id)!==String(tenantId)) throw new Error('DEVICE_CROSS_TENANT');
+    if(existing && String(existing.user_id)!==String(userId) && !allowRebind) throw new Error('DEVICE_NOT_OWNED');
+    await client.query(
+      `insert into devices(id,user_id,tenant_id,device_name,mode,last_seen_at)
+       values($1,$2,$3,$4,$5,now())
+       on conflict(id) do update set user_id=excluded.user_id,tenant_id=excluded.tenant_id,device_name=excluded.device_name,mode=excluded.mode,last_seen_at=now()`,
+      [String(deviceId),String(userId),String(tenantId),String(deviceName||''),String(mode)]
+    );
+    return {deviceId:String(deviceId),mode:String(mode),status:'registered'};
+  });
+}
+async function tenantEmergencyStopped(tenantId) {
+  return Boolean((await query('select emergency_stop from tenants where id=$1',[String(tenantId)])).rows[0]?.emergency_stop);
 }
 
 
@@ -453,9 +443,54 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
   }
 });
 
+app.get('/security/emergency-stop',auth,async(req,res)=>res.json({stopped:await tenantEmergencyStopped(req.user.tenant_id)}));
+app.post('/security/emergency-stop',auth,async(req,res)=>{
+  const stopped=req.body?.stopped===true;
+  await query('update tenants set emergency_stop=$1,updated_at=now() where id=$2',[stopped,req.user.tenant_id]);
+  res.json({ok:true,stopped});
+});
+
 app.get('/commands',auth,async(req,res)=>{const cid=userId(req);if(!cid)return res.json({commands:[]});const rows=(await query('select id,device_id as "deviceId",mode,command,status,created_at as "createdAt" from commands where user_id=$1 order by created_at desc limit 50',[cid])).rows;res.json({commands:rows});});
-app.get('/commands/next',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const deviceId=String(req.query?.deviceId||'').trim();const d=(await query('select id,user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,req.user.tenant_id])).rows[0];if(!d||d.user_id!==req.user.sub||d.mode!=='operacao')return errorJson(res,403,'Terminal OPERAÇÃO não autorizado.');const r=await query("select id,command,mode,status from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc limit 1",[req.user.sub,deviceId,req.user.tenant_id]);res.json({ok:true,command:r.rows[0]||null});});
-app.post('/commands/:commandId/status',auth,async(req,res)=>{if(!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');const id=String(req.params.commandId),status=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'');if(!['completed','failed','cancelled'].includes(status)||!deviceId)return errorJson(res,400,'Status ou deviceId inválido.');const owned=(await query('select id from commands where id=$1 and user_id=$2 and tenant_id=$4 and device_id=$3',[id,req.user.sub,deviceId,req.user.tenant_id])).rows[0];if(!owned)return errorJson(res,403,'Comando não pertence ao tenant/usuário.','TENANT_ISOLATION');try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'update',payload:{action:'update_command_status',commandId:id,deviceId,status,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,...result});}catch{return errorJson(res,403,'Atualização de comando rejeitada.','POLICY_DENIED');}});
+app.get('/commands/next',auth,async(req,res)=>{
+  if(!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
+  const deviceId=String(req.query?.deviceId||'').trim();
+  if(await tenantEmergencyStopped(req.user.tenant_id)) return res.json({ok:true,command:null,blocked:true});
+  try{
+    const command=await withTransaction(async client=>{
+      const d=(await client.query('select id,user_id,mode from devices where id=$1 and tenant_id=$2 for update',[deviceId,req.user.tenant_id])).rows[0];
+      if(!d||String(d.user_id)!==String(req.user.sub)||d.mode!=='operacao') throw Object.assign(new Error('DEVICE_NOT_OWNED'),{status:403});
+      const row=(await client.query(
+        "update commands set status='dispatched',updated_at=now() where id=(select id from commands where user_id=$1 and tenant_id=$3 and device_id=$2 and mode='operacao' and status='queued' order by created_at asc for update skip locked limit 1) returning id,command,mode,status",
+        [req.user.sub,deviceId,req.user.tenant_id]
+      )).rows[0]||null;
+      if(row) await client.query("insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,'dispatched')",[req.user.tenant_id,req.user.sub,row.id]);
+      return row;
+    });
+    return res.json({ok:true,command});
+  }catch(e){
+    return errorJson(res,e.status||500,e.status===403?'Terminal OPERAÇÃO não autorizado.':'Não foi possível reservar o comando.');
+  }
+});
+app.post('/commands/:commandId/status',auth,async(req,res)=>{
+  if(!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
+  const id=String(req.params.commandId),next=String(req.body?.status||'').toLowerCase(),deviceId=String(req.body?.deviceId||'').trim();
+  if(!['executing','succeeded','failed','cancelled'].includes(next)||!deviceId) return errorJson(res,400,'Status ou deviceId inválido.');
+  try{
+    const status=await withTransaction(async client=>{
+      const row=(await client.query('select status from commands where id=$1 and user_id=$2 and tenant_id=$3 and device_id=$4 for update',[id,req.user.sub,req.user.tenant_id,deviceId])).rows[0];
+      if(!row) throw Object.assign(new Error('TENANT_ISOLATION'),{status:403});
+      const current=String(row.status);
+      const valid=(next==='executing'&&current==='dispatched')||(['succeeded','failed','cancelled'].includes(next)&&['dispatched','executing'].includes(current));
+      if(!valid) throw Object.assign(new Error('INVALID_COMMAND_TRANSITION'),{status:409});
+      await client.query('update commands set status=$1,updated_at=now() where id=$2',[next,id]);
+      await client.query('insert into command_events(tenant_id,user_id,command_id,status) values($1,$2,$3,$4)',[req.user.tenant_id,req.user.sub,id,next]);
+      return next;
+    });
+    return res.json({ok:true,id,status});
+  }catch(e){
+    return errorJson(res,e.status||500,e.status===403?'Comando não pertence ao tenant/usuário.':e.status===409?'Transição de comando inválida.':'Falha ao atualizar comando.');
+  }
+});
 
 function plans() {
   const fallback=[{id:'basic',name:'Básico',price:99.90,description:'Acesso ao VÉRTICE para operação individual.'},{id:'pro',name:'Profissional',price:199.90,description:'Recursos ampliados para operação profissional.'},{id:'business',name:'Empresarial',price:499.90,description:'Estrutura para uso empresarial.'}];
@@ -526,200 +561,62 @@ app.post('/webhooks/mercadopago',async(req,res)=>{if(!validMercadoPagoWebhook(re
 app.get('/sales',auth,async(req,res)=>{const m=month(req.query?.month);if(!m)return errorJson(res,400,'Mês inválido.');const rows=(await query('select id,amount,currency_code as currency,provider,status,checkout_url as "checkoutUrl",paid_at as "paidAt",created_at as "createdAt" from payments where user_id=$1 and to_char(created_at,\'YYYY-MM\')=$2 order by created_at desc limit 100',[req.user.sub,m])).rows;res.json({month:m,sales:rows});});
 app.post('/sales/orders',auth,async(req,res)=>{const product=String(req.body?.product||'').trim().slice(0,120),amount=money(req.body?.amount),market=normalizeMarket(req.body?.countryCode||'BR',req.body?.locale,req.body?.currencyCode);if(!product||!Number.isFinite(amount)||amount<=0||!market)return errorJson(res,400,'Produto, valor ou mercado inválido.');req.body={...req.body,plan:product};return res.redirect(307,'/public/signup/checkout');});
 
-app.post('/ai/agent/chat', auth, async (req, res) => {
-  if (req.user.role !== 'OWNER' && !(await activeSubscription(req.user.sub))) {
-    return errorJson(res, 402, 'Assinatura não está ativa.');
+app.post('/ai/agent/chat', auth, async (req,res) => {
+  if (req.user.role !== 'OWNER' && !(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
+  const message=String(req.body?.message||'').trim().slice(0,6000);
+  const mode=String(req.body?.mode||'').trim();
+  if(!message||!['comando','operacao','monitoramento'].includes(mode)) return errorJson(res,400,'Mensagem ou modo inválido.');
+
+  const key=String(process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'');
+  const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');
+  const systemInstruction='Retorne somente uma proposta JSON. A IA interpreta a intenção, mas não autoriza nem executa. Formato: {"command":"comando normalizado","reason":"ação pretendida","intent":"execute"}. Não invente credenciais ou segredos.';
+  let proposal={command:message.slice(0,2000),reason:'Intenção recebida pelo VÉRTICE.',intent:'execute'};
+
+  if(key&&base){
+    try{
+      const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model:process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini'),temperature:0,messages:[{role:'system',content:systemInstruction},{role:'user',content:message}],response_format:{type:'json_object'}})},20000);
+      const raw=String(data?.choices?.[0]?.message?.content||'');
+      const parsed=JSON.parse(raw);
+      if(parsed&&typeof parsed==='object') proposal={command:String(parsed.command||message).slice(0,2000),reason:String(parsed.reason||'Intenção recebida pelo VÉRTICE.').slice(0,1000),intent:'execute'};
+    }catch(e){console.error('[ai/proposal]',e.message);}
   }
 
-  const message = String(req.body?.message || '').trim().slice(0, 6000);
-  const mode = String(req.body?.mode || '').trim();
-
-  if (!message || !['comando', 'operacao', 'monitoramento'].includes(mode)) {
-    return errorJson(res, 400, 'Mensagem ou modo inválido.');
-  }
-
-  const deviceId = String(req.body?.deviceId || '').trim();
-  const emergencyStopped = req.body?.emergencyStopped === true;
-  if (mode === 'operacao' && !deviceId) return errorJson(res, 400, 'deviceId é obrigatório no modo OPERAÇÃO.');
-
-  const key = String(
-    process.env.VERTICE_AI_API_KEY ||
-    process.env.GROQ_API_KEY ||
-    process.env.OPENAI_API_KEY ||
-    ''
-  );
-
-  const base = String(
-    process.env.VERTICE_AI_BASE_URL ||
-    (process.env.GROQ_API_KEY
-      ? 'https://api.groq.com/openai/v1'
-      : process.env.OPENAI_API_KEY
-        ? 'https://api.openai.com/v1'
-        : '')
-  ).replace(/\/$/, '');
-
-  const systemInstruction = `
-Você é o orquestrador operacional VÉRTICE.
-
-DIRETRIZ DE EXECUÇÃO:
-- Não exija que o usuário forneça previamente Objetivo, Contexto ou Evidências.
-- Interprete diretamente o comando recebido.
-- Identifique a ação solicitada e produza uma intenção operacional estruturada.
-- Não responda que "nenhuma execução foi autorizada pela IA".
-- Quando o pedido representar uma ação operacional válida, retorne uma intenção executável.
-- A autorização técnica final continua pertencendo ao backend VÉRTICE e ao Policy Engine.
-- Nunca invente credenciais, tokens ou dados.
-- Nunca revele segredos.
-- Retorne JSON válido.
-
-Formato:
-{
-  "intent": "execute",
-  "command": "comando original normalizado",
-  "reason": "descrição curta da ação",
-  "shouldExecute": true
-}
-`;
-
-  let aiResult = {
-    intent: 'execute',
-    command: message,
-    reason: 'Comando recebido pelo VÉRTICE.',
-    shouldExecute: true
-  };
-
-  if (key && base) {
-    try {
-      const model =
-        process.env.VERTICE_AI_MODEL ||
-        (process.env.GROQ_API_KEY
-          ? 'llama-3.3-70b-versatile'
-          : 'gpt-4o-mini');
-
-      const data = await providerFetch(
-        base,
-        '/chat/completions',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + key
-          },
-          body: JSON.stringify({
-            model,
-            temperature: 0,
-            messages: [
-              {
-                role: 'system',
-                content: systemInstruction
-              },
-              {
-                role: 'user',
-                content: message
-              }
-            ],
-            response_format: {
-              type: 'json_object'
-            }
-          })
-        },
-        20000
-      );
-
-      const raw = String(
-        data?.choices?.[0]?.message?.content || ''
-      );
-
-      try {
-        const parsed = JSON.parse(raw);
-
-        if (parsed && typeof parsed === 'object') {
-          aiResult = {
-            intent: 'execute',
-            command: String(parsed.command || message).slice(0, 2000),
-            reason: String(
-              parsed.reason || 'Comando recebido pelo VÉRTICE.'
-            ).slice(0, 1000),
-            shouldExecute: parsed.shouldExecute !== false
-          };
-        }
-      } catch {
-        // Preserva o comando original se o modelo não retornar JSON válido.
-      }
-    } catch (e) {
-      console.error('[ai]', e.message);
-    }
-  }
-
-  let execution = { requested: false, status: 'not_requested' };
-  if (mode === 'operacao' && aiResult.shouldExecute && !emergencyStopped) {
-    try {
-      const tenantId = String(req.user.tenant_id || '');
-      const actorUserId = String(req.user.sub || '');
-      if (req.user.role === 'OWNER') {
-        await registerDeviceNow({ tenantId, userId: actorUserId, deviceId, mode: 'operacao', deviceName: String(req.body?.deviceName || 'Android • OPERAÇÃO').slice(0, 100), allowRebind: true });
-      } else {
-        const d = (await query('select user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,tenantId])).rows[0];
-        if (!d || String(d.user_id) !== actorUserId) return errorJson(res,403,'Dispositivo não pertence à conta.','DEVICE_NOT_OWNED');
-        if (String(d.mode) !== 'operacao') return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.','DEVICE_MODE_MISMATCH');
-      }
-      const commandId=crypto.randomUUID();
-      const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId,actorUserId,type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command:aiResult.command,mode:'operacao',deviceId,userId:actorUserId,actorRole:String(req.user.role)},idempotencyKey:'ai-command-'+commandId});
-      execution={requested:true,commandId,executionId:result.actionId,status:result.status};
-    } catch(e) {
-      console.error('[ai/execution]',e.message);
-      return errorJson(res,409,'A intenção foi reconhecida, mas não pôde ser enfileirada para execução.','EXECUTION_ENQUEUE_FAILED');
-    }
-  } else if (mode === 'operacao' && emergencyStopped) {
-    execution={requested:false,status:'blocked_emergency'};
-  }
-
-  if (req.user.role !== 'OWNER') {
-    await query(
-      `insert into ai_conversations
-       (user_id, mode, role, content)
-       values
-       ($1, $2, 'user', $3),
-       ($1, $2, 'assistant', $4)`,
-      [
-        req.user.sub,
-        mode,
-        message,
-        JSON.stringify(aiResult)
-      ]
-    );
-  }
-
-  return res.json({
-    ok: true,
-    answer: aiResult.reason,
-    intent: aiResult.intent,
-    confidence: 1,
-    command: aiResult.command,
-    shouldExecute: aiResult.shouldExecute,
-    actions: [
-      {
-        type: 'execute',
-        label: 'Executar comando'
-      }
-    ],
-    execution: {
-      governance: 'backend_policy_engine',
-      risk: 'backend_controlled',
-      autonomy: execution.requested ? 'command_enqueued_by_backend' : 'command_not_enqueued',
-      ...execution
-    },
-    mode
-  });
+  const proposalId=crypto.randomUUID();
+  if(req.user.role!=='OWNER') await query('insert into ai_conversations(user_id,tenant_id,mode,role,content) values($1,$2,$3,\'user\',$4),($1,$2,$3,\'assistant\',$5)',[req.user.sub,req.user.tenant_id,mode,message,JSON.stringify({...proposal,proposalId})]);
+  return res.json({ok:true,proposalId,...proposal,execution:{status:'not_requested'},mode});
 });
+
+app.post('/ai/agent/execute',auth,async(req,res)=>{
+  if(req.user.role!=='OWNER'&&!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
+  const mode=String(req.body?.mode||'').trim(),deviceId=String(req.body?.deviceId||'').trim(),command=String(req.body?.command||'').trim().slice(0,2000),proposalId=String(req.body?.proposalId||'').trim();
+  if(mode!=='operacao'||!deviceId||!command||!/^\w{8}-\w{4}-\w{4}-\w{4}-\w{12}$/.test(proposalId)) return errorJson(res,400,'Proposta ou dispositivo inválido.');
+  if(await tenantEmergencyStopped(req.user.tenant_id)) return errorJson(res,409,'EMERGENCY_STOP ativo.','EMERGENCY_STOP');
+  try{
+    const tenantId=String(req.user.tenant_id),actorUserId=String(req.user.sub);
+    if(req.user.role==='OWNER') await registerDeviceNow({tenantId,userId:actorUserId,deviceId,mode,deviceName:String(req.body?.deviceName||'Android • OPERAÇÃO').slice(0,100),allowRebind:true});
+    else{
+      const d=(await query('select user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,tenantId])).rows[0];
+      if(!d||String(d.user_id)!==actorUserId) return errorJson(res,403,'Dispositivo não pertence à conta.','DEVICE_NOT_OWNED');
+      if(String(d.mode)!=='operacao') return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.','DEVICE_MODE_MISMATCH');
+    }
+    const commandId=crypto.randomUUID();
+    const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId,actorUserId,type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode:'operacao',deviceId,userId:actorUserId,actorRole:String(req.user.role),proposalId},idempotencyKey:'ai-command-'+commandId});
+    return res.status(202).json({ok:true,proposalId,commandId,executionId:result.actionId,status:result.status});
+  }catch(e){console.error('[ai/execute]',e.message);return errorJson(res,409,'Proposta rejeitada pelo Policy Engine.','POLICY_DENIED');}
+});
+
 app.get('/ai/agent/history',auth,async(req,res)=>{if(req.user.role==='OWNER')return res.json({ok:true,history:[]});const rows=(await query('select role,content,mode,created_at as "createdAt" from ai_conversations where user_id=$1 order by created_at desc limit 100',[req.user.sub])).rows.reverse();res.json({ok:true,history:rows});});
 
 app.get('/admin/overview',auth,ownerOnly,async(req,res)=>{const [customers,subs,devices,commands,sales]=await Promise.all([query('select count(*)::int n from users'),query("select count(*)::int n from subscriptions where status='active'"),query('select count(*)::int n from devices'),query("select count(*)::int n from commands where created_at>=current_date"),query("select coalesce(sum(amount),0) n from payments where status='paid' and to_char(created_at,'YYYY-MM')=to_char(current_date,'YYYY-MM')")]);res.json({customers:customers.rows[0].n,activeSubscriptions:subs.rows[0].n,devices:devices.rows[0].n,commandsToday:commands.rows[0].n,salesMonth:Number(sales.rows[0].n||0)});});
 
 app.post('/api/v1/execution',auth,async(req,res)=>{try{const body=req.body||{};const intent={actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id||''),actorUserId:String(req.user.sub),type:String(body.type||''),resource:String(body.resource||''),operation:body.operation,payload:body.payload&&typeof body.payload==='object'?body.payload:{},idempotencyKey:String(req.headers['idempotency-key']||body.idempotencyKey||'')};if(!intent.tenantId||intent.idempotencyKey.length<16)return errorJson(res,400,'tenant_id e Idempotency-Key são obrigatórios.');const result=await enqueueExecution(intent);return res.status(result.status==='awaiting_mfa'?202:202).json({ok:true,...result});}catch(e){return errorJson(res,403,'Operação rejeitada pelo Policy Engine.','POLICY_DENIED');}});
-app.post('/api/v1/execution/:actionId/approve',auth,async(req,res)=>{if(!['OWNER','ADMIN'].includes(String(req.user.role)))return errorJson(res,403,'Aprovação administrativa necessária.');const id=String(req.params.actionId);try{const result=await withTransaction(async client=>{const task=(await client.query("select id,status,payload from tasks where id=$1 and tenant_id=$2 for update",[id,req.user.tenant_id])).rows[0];if(!task||task.status!=='awaiting_approval')throw new Error('TASK_NOT_AWAITING_APPROVAL');await client.query("update tasks set status='queued',approved_at=now(),updated_at=now() where id=$1 and tenant_id=$2",[id,req.user.tenant_id]);await client.query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) values($1,'task',$2,'execution.requested',$3,'pending',now()) on conflict do nothing",[req.user.tenant_id,id,JSON.stringify(task.payload)]);return {id,status:'queued'};});return res.json({ok:true,...result});}catch(e){return errorJson(res,409,'Ação não está aguardando aprovação.');}});
+app.post('/api/v1/execution/:actionId/approve',auth,async(req,res)=>{if(!['OWNER','ADMIN'].includes(String(req.user.role)))return errorJson(res,403,'Aprovação administrativa necessária.');const id=String(req.params.actionId);try{const result=await withTransaction(async client=>{const task=(await client.query("select id,status,payload from tasks where id=$1 and tenant_id=$2 for update",[id,req.user.tenant_id])).rows[0];if(!task||task.status!=='awaiting_approval')throw new Error('TASK_NOT_AWAITING_APPROVAL');await client.query("update tasks set status='queued',approved_at=now(),updated_at=now() where id=$1 and tenant_id=$2",[id,req.user.tenant_id]);
+      const commandId=(await client.query("select (payload->>'commandId')::uuid as id from tasks where id=$1 and tenant_id=$2",[id,req.user.tenant_id])).rows[0]?.id;
+      if(commandId){await client.query("update commands set status='queued',updated_at=now() where id=$1 and tenant_id=$2 and status='authorized'",[commandId,req.user.tenant_id]);await client.query("insert into command_events(tenant_id,user_id,command_id,status,metadata) values($1,$2,$3,'queued',$4)",[req.user.tenant_id,req.user.sub,commandId,JSON.stringify({source:'approval'})]);}await client.query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) values($1,'task',$2,'execution.requested',$3,'pending',now()) on conflict do nothing",[req.user.tenant_id,id,JSON.stringify(task.payload)]);return {id,status:'queued'};});return res.json({ok:true,...result});}catch(e){return errorJson(res,409,'Ação não está aguardando aprovação.');}});
 app.post('/api/v1/mfa/enroll',auth,async(req,res)=>{if(req.user.role!=='OWNER'&&!(await activeSubscription(req.user.sub)))return errorJson(res,402,'Assinatura não está ativa.');try{return res.json({ok:true,...await enrollMfa(String(req.user.sub),String(req.user.tenant_id))});}catch{return errorJson(res,500,'Não foi possível preparar MFA.');}});
-app.post('/api/v1/mfa/verify',auth,async(req,res)=>{const code=String(req.body?.code||'');const taskId=String(req.body?.taskId||'');if(!/^\\d{6}$/.test(code))return errorJson(res,400,'Código MFA inválido.');try{const ok=taskId?await verifyEnabledMfa(String(req.user.sub),String(req.user.tenant_id),code):await enableMfa(String(req.user.sub),String(req.user.tenant_id),code);if(!ok)return errorJson(res,401,'Código MFA inválido.');if(taskId){const task=(await query('select id,status from tasks where id=$1 and tenant_id=$2 and user_id=$3',[taskId,req.user.tenant_id,req.user.sub])).rows[0];if(!task)return errorJson(res,404,'Tarefa não encontrada.');await query("update tasks set status='queued',mfa_verified_at=now(),updated_at=now() where id=$1 and tenant_id=$2 and status='awaiting_mfa'",[taskId,req.user.tenant_id]);await query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) select $1,'task',$2,'execution.requested',payload,'pending',now() from tasks where id=$2 and tenant_id=$1 on conflict do nothing",[req.user.tenant_id,taskId]);}return res.json({ok:true,verified:true,taskId:taskId||undefined});}catch{return errorJson(res,500,'Não foi possível validar MFA.');}});
+app.post('/api/v1/mfa/verify',auth,async(req,res)=>{const code=String(req.body?.code||'');const taskId=String(req.body?.taskId||'');if(!/^\\d{6}$/.test(code))return errorJson(res,400,'Código MFA inválido.');try{const ok=taskId?await verifyEnabledMfa(String(req.user.sub),String(req.user.tenant_id),code):await enableMfa(String(req.user.sub),String(req.user.tenant_id),code);if(!ok)return errorJson(res,401,'Código MFA inválido.');if(taskId){const task=(await query('select id,status from tasks where id=$1 and tenant_id=$2 and user_id=$3',[taskId,req.user.tenant_id,req.user.sub])).rows[0];if(!task)return errorJson(res,404,'Tarefa não encontrada.');await query("update tasks set status='queued',mfa_verified_at=now(),updated_at=now() where id=$1 and tenant_id=$2 and status='awaiting_mfa'",[taskId,req.user.tenant_id]);
+    const commandId=(await query("select (payload->>'commandId')::uuid as id from tasks where id=$1 and tenant_id=$2",[taskId,req.user.tenant_id])).rows[0]?.id;
+    if(commandId){await query("update commands set status='queued',updated_at=now() where id=$1 and tenant_id=$2 and status='authorized'",[commandId,req.user.tenant_id]);await query("insert into command_events(tenant_id,user_id,command_id,status,metadata) values($1,$2,$3,'queued',$4)",[req.user.tenant_id,req.user.sub,commandId,JSON.stringify({source:'mfa'})]);}await query("insert into outbox_events(tenant_id,aggregate_type,aggregate_id,event_type,payload,status,created_at) select $1,'task',$2,'execution.requested',payload,'pending',now() from tasks where id=$2 and tenant_id=$1 on conflict do nothing",[req.user.tenant_id,taskId]);}return res.json({ok:true,verified:true,taskId:taskId||undefined});}catch{return errorJson(res,500,'Não foi possível validar MFA.');}});
 app.use((err,req,res,next)=>{safeLog('[vertice]',safeError(err));if(res.headersSent)return next(err);return errorJson(res,500,'Erro interno do servidor.');});
 
 async function start() {

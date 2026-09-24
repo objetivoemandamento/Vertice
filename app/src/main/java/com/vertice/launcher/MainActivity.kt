@@ -109,27 +109,80 @@ private fun VerticeApp() {
 @Composable private fun ModeCard(title: String, subtitle: String, busy: Boolean, onClick: () -> Unit) { Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(15.dp)) { Text(title, fontWeight = FontWeight.Bold, fontSize = 18.sp); Text(subtitle, fontSize = 13.sp); Spacer(Modifier.height(8.dp)); Button(onClick, Modifier.fillMaxWidth(), enabled = !busy) { Text(if (busy) "CONFIGURANDO…" else "USAR ESTE MODO") } } } }
 
 @Composable private fun CommandCenter(api: VerticeApi, token: String, role: String, mode: String, session: VerticeSession, onModeChange: (String) -> Unit, onLogout: () -> Unit) {
-    val context = LocalContext.current; val scope = rememberCoroutineScope(); val history = remember(token) { ConversationHistory(context, session.email.ifBlank { token.take(16) }) }; var input by remember { mutableStateOf("") }; var chat by remember { mutableStateOf(emptyList<ChatLine>()) }; var busy by remember { mutableStateOf(false) }; var status by remember { mutableStateOf("") }; var showHistory by remember { mutableStateOf(false) }; var emergency by remember { mutableStateOf(session.emergencyStop) }; var deviceReady by remember { mutableStateOf(false) }
-    LaunchedEffect(token, mode) { val stored = withContext(Dispatchers.IO) { history.load() }; chat = if (stored.isEmpty()) listOf(ChatLine(false, "VÉRTICE ativo. Diga o que precisa decidir, pesquisar, estruturar ou executar.")) else stored.map { ChatLine(it.fromUser, it.text) }; val registered = withContext(Dispatchers.IO) { api.registerDevice(token, session.deviceId, mode, "Android • ${mode.uppercase()}", role == "OWNER") }; deviceReady = registered.isSuccess; if (!deviceReady) status = registered.exceptionOrNull()?.message ?: "Não foi possível vincular este aparelho à conta." }
-    fun save(line: ChatLine) { history.append(StoredChatLine(line.fromUser, line.text, System.currentTimeMillis())) }
-    fun toggleEmergency() { emergency = !emergency; session.emergencyStop = emergency; status = if (emergency) "EMERGÊNCIA ATIVADA • autonomia bloqueada." else "AUTONOMIA RETOMADA."; val a = ChatLine(false, status); chat = chat + a; save(a) }
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Column(Modifier.weight(1f)) { Text("VÉRTICE", fontSize = 27.sp, fontWeight = FontWeight.Bold); Text("$role • ${mode.uppercase()}", fontSize = 12.sp) }; TextButton(onClick = { showHistory = !showHistory }) { Text("HISTÓRICO") }; TextButton(onClick = onLogout) { Text("Sair") } }
-        Spacer(Modifier.height(6.dp)); Button(onClick = { toggleEmergency() }, Modifier.fillMaxWidth()) { Text(if (emergency) "▶ RETOMAR AUTONOMIA" else "■ EMERGÊNCIA • PARAR AUTONOMIA") }
-        Text(if (emergency) "Estado: AUTONOMIA BLOQUEADA" else "Estado: AUTONOMIA ATIVA", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        if (showHistory) Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(10.dp)) { Text("Histórico salvo", fontWeight = FontWeight.Bold); Text("As conversas e comandos ficam salvos neste aparelho."); TextButton(onClick = { history.clear(); chat = listOf(ChatLine(false, "Histórico limpo. VÉRTICE ativo.")); showHistory = false }) { Text("LIMPAR HISTÓRICO") } } }
-        Spacer(Modifier.height(8.dp)); Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) { MODES.forEach { current -> if (current == mode) Button(onClick = {}) { Text(current.uppercase()) } else OutlinedButton(onClick = { onModeChange(current) }) { Text(current.uppercase()) } } }
-        Spacer(Modifier.height(8.dp)); LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) { items(chat) { line -> Card(Modifier.fillMaxWidth()) { Column(Modifier.padding(10.dp)) { Text(if (line.fromUser) "VOCÊ" else "VÉRTICE", fontSize = 11.sp, fontWeight = FontWeight.Bold); Text(line.text) } } } }
-        OutlinedTextField(input, { input = it }, Modifier.fillMaxWidth(), label = { Text("Fale com o VÉRTICE") }, maxLines = 4); Spacer(Modifier.height(6.dp))
-        Button(onClick = { val text = input.trim(); if (text.isEmpty()) return@Button; input = ""; val u = ChatLine(true, text); chat = chat + u; save(u); busy = true; scope.launch { 
-            val deviceReady = if (mode == "operacao") {
-                withContext(Dispatchers.IO) { api.registerDevice(token, session.deviceId, mode, "Android • ${mode.uppercase()}", role == "OWNER") }.isSuccess
-            } else true
-            if (!deviceReady) {
-                status = "Não foi possível vincular este aparelho à conta antes da execução."
-                val e = ChatLine(false, status); chat = chat + e; save(e); busy = false; return@launch
+    val context=LocalContext.current
+    val scope=rememberCoroutineScope()
+    val history=remember(token){ConversationHistory(context,session.email.ifBlank{token.take(16)})}
+    var input by remember{mutableStateOf("")}
+    var chat by remember{mutableStateOf(emptyList<ChatLine>())}
+    var busy by remember{mutableStateOf(false)}
+    var status by remember{mutableStateOf("")}
+    var showHistory by remember{mutableStateOf(false)}
+    var emergency by remember{mutableStateOf(session.emergencyStop)}
+
+    LaunchedEffect(token,mode){
+        val stored=withContext(Dispatchers.IO){history.load()}
+        chat=if(stored.isEmpty())listOf(ChatLine(false,"VÉRTICE ativo. Diga o que precisa decidir, pesquisar, estruturar ou executar."))else stored.map{ChatLine(it.fromUser,it.text)}
+        api.emergencyState(token).onSuccess{emergency=it;session.emergencyStop=it}
+    }
+
+    fun save(line:ChatLine){history.append(StoredChatLine(line.fromUser,line.text,System.currentTimeMillis()))}
+    fun toggleEmergency(){
+        val next=!emergency
+        scope.launch{
+            api.emergencyStop(token,next).onSuccess{
+                emergency=it;session.emergencyStop=it
+                status=if(it)"EMERGENCY_STOP ATIVO • execução bloqueada." else "EMERGENCY_STOP desativado."
+            }.onFailure{status=it.message?:"Não foi possível alterar o EMERGENCY_STOP."}
+        }
+    }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)){
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
+            Column(Modifier.weight(1f)){Text("VÉRTICE",fontSize=27.sp,fontWeight=FontWeight.Bold);Text("$role • ${mode.uppercase()}",fontSize=12.sp)}
+            TextButton(onClick={showHistory=!showHistory}){Text("HISTÓRICO")}
+            TextButton(onClick=onLogout){Text("Sair")}
+        }
+        Spacer(Modifier.height(6.dp))
+        Button(onClick={toggleEmergency},Modifier.fillMaxWidth(),enabled=!busy){Text(if(emergency)"▶ RETOMAR AUTONOMIA" else "■ EMERGÊNCIA • PARAR AUTONOMIA")}
+        Text(if(emergency)"Estado: AUTONOMIA BLOQUEADA" else "Estado: AUTONOMIA ATIVA",fontSize=12.sp,fontWeight=FontWeight.SemiBold)
+        if(showHistory)Card(Modifier.fillMaxWidth()){Column(Modifier.padding(10.dp)){Text("Histórico salvo",fontWeight=FontWeight.Bold);Text("As conversas ficam salvas neste aparelho.");TextButton(onClick={history.clear();chat=listOf(ChatLine(false,"Histórico limpo. VÉRTICE ativo."));showHistory=false}){Text("LIMPAR HISTÓRICO")}}}
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.spacedBy(5.dp)){MODES.forEach{current->if(current==mode)Button(onClick={}){Text(current.uppercase())}else OutlinedButton(onClick={onModeChange(current)}){Text(current.uppercase())}}}
+        Spacer(Modifier.height(8.dp))
+        LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(7.dp)){items(chat){line->Card(Modifier.fillMaxWidth()){Column(Modifier.padding(10.dp)){Text(if(line.fromUser)"VOCÊ" else "VÉRTICE",fontSize=11.sp,fontWeight=FontWeight.Bold);Text(line.text)}}}}
+        OutlinedTextField(input,{input=it},Modifier.fillMaxWidth(),label={Text("Fale com o VÉRTICE")},maxLines=4)
+        Spacer(Modifier.height(6.dp))
+        Button(onClick={
+            val text=input.trim()
+            if(text.isEmpty()||busy)return@Button
+            input=""
+            val userLine=ChatLine(true,text);chat=chat+userLine;save(userLine);busy=true
+            scope.launch{
+                if(mode=="operacao"&&!emergency){
+                    val reg=withContext(Dispatchers.IO){api.registerDevice(token,session.deviceId,mode,"Android • OPERAÇÃO",role=="OWNER")}
+                    if(reg.isFailure){status=reg.exceptionOrNull()?.message?:"Dispositivo não autorizado.";busy=false;return@launch}
+                }
+                val reply=withContext(Dispatchers.IO){api.chat(token,text,mode)}
+                if(reply.isFailure){
+                    status=reply.exceptionOrNull()?.message?:"Falha ao consultar o VÉRTICE."
+                }else{
+                    val proposal=reply.getOrThrow()
+                    val bot=ChatLine(false,proposal.answer);chat=chat+bot;save(bot)
+                    status="Proposta gerada."
+                    if(mode=="operacao"&&!emergency){
+                        val execution=withContext(Dispatchers.IO){api.executeProposal(token,proposal.proposalId,proposal.command,session.deviceId,"Android • OPERAÇÃO")}
+                        status=execution.fold(
+                            onSuccess={"Execução: ${it.status} • comando ${it.commandId}"},
+                            onFailure={it.message?:"A proposta foi recusada para execução."}
+                        )
+                    }else if(mode=="operacao"){
+                        status="Execução bloqueada pelo EMERGENCY_STOP."
+                    }
+                }
+                val s=ChatLine(false,status);chat=chat+s;save(s);busy=false
             }
-            val reply = withContext(Dispatchers.IO) { api.chat(token, text, mode, session.deviceId, session.emergencyStop, "Android • ${mode.uppercase()}") }; if (reply.isSuccess) { val ai = reply.getOrThrow(); val b = ChatLine(false, ai.answer); chat = chat + b; save(b); if (mode == "operacao") { status = when (ai.executionStatus) { "queued" -> "Execução enfileirada • aguardando entrega ao aparelho."; "awaiting_mfa" -> "Execução aguardando MFA."; "blocked_emergency" -> "Execução bloqueada: emergência ativada."; "not_requested" -> "Comando não solicitado para execução."; else -> "Execução: ${ai.executionStatus}" }; val a = ChatLine(false, status); chat = chat + a; save(a) } } else { status = reply.exceptionOrNull()?.message ?: "Falha ao consultar o VÉRTICE."; val e = ChatLine(false, status); chat = chat + e; save(e) }; busy = false } }, Modifier.fillMaxWidth(), enabled = !busy) { Text(if (busy) "ENVIANDO…" else "ENVIAR") }
-        if (status.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(status, fontSize = 12.sp) }
+        },Modifier.fillMaxWidth(),enabled=!busy){Text(if(busy)"PROCESSANDO…" else "ENVIAR")}
+        if(status.isNotBlank()){Spacer(Modifier.height(6.dp));Text(status,fontSize=12.sp)}
     }
 }
+

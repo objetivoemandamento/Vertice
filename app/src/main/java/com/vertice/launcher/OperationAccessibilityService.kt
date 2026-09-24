@@ -78,11 +78,12 @@ class OperationAccessibilityService : AccessibilityService() {
             runCatching { api.updateCommandStatus(token, command.id, "cancelled", "Execução bloqueada pelo botão de emergência.", deviceId) }
             return
         }
+        api.updateCommandStatus(token, command.id, "executing", "Execução física iniciada.", deviceId)
         val result = performCommandPlan(command.command, safety.generation)
         val status = when {
             EmergencyState.isStopped(this) -> "cancelled"
             EmergencyState.generation(this) != safety.generation -> "cancelled"
-            result.first -> "completed"
+            result.first -> "succeeded"
             else -> "failed"
         }
         api.updateCommandStatus(token, command.id, status, result.second, deviceId)

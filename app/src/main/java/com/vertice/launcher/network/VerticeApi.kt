@@ -35,7 +35,28 @@ class VerticeApi(private val baseUrl:String){
  }
  fun status(token:String):Result<SubscriptionStatus> = getWithRetry{val q=authorized("/me",token).get().build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val o=JSONObject(r.body?.string().orEmpty());val s=o.optJSONObject("subscription");SubscriptionStatus(s?.optString("plan","basic")?:"basic",s?.optString("status","blocked")?:"blocked",s?.optString("currentPeriodEnd","")?:"")}}
  fun registerDevice(token:String,deviceId:String,mode:String,deviceName:String,owner:Boolean=false):Result<Unit> = getPostWithRetry{val b=JSONObject().put("deviceId",deviceId).put("mode",mode).put("deviceName",deviceName).toString().toRequestBody(json);val endpoint=if(owner)"/owner/devices/register" else "/devices/register";val q=authorized(endpoint,token).post(b).build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()))}}
- fun chat(token:String,message:String,mode:String,deviceId:String?=null,emergencyStopped:Boolean=false,deviceName:String?=null):Result<AiReply> = requestResult{val b=JSONObject().put("message",message).put("mode",mode).put("emergencyStopped",emergencyStopped).apply{if(!deviceId.isNullOrBlank())put("deviceId",deviceId);if(!deviceName.isNullOrBlank())put("deviceName",deviceName)}.toString().toRequestBody(json);val q=authorized("/ai/agent/chat",token).post(b).build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val o=JSONObject(r.body?.string().orEmpty());val a=o.optJSONArray("actions");val actions=buildList<String>{if(a!=null)for(i in 0 until a.length()){val x=a.opt(i);if(x is JSONObject)add(x.optString("label").ifBlank{x.optString("type")})else add(x.toString())}};AiReply(o.optString("answer"),actions,o.optString("command",""),o.optBoolean("shouldExecute",false),o.optJSONObject("execution")?.optString("status","not_requested")?:"not_requested")}}
+ fun chat(token:String,message:String,mode:String):Result<AiReply> = requestResult{
+   val b=JSONObject().put("message",message).put("mode",mode).toString().toRequestBody(json)
+   val q=authorized("/ai/agent/chat",token).post(b).build()
+   http.newCall(q).execute().use{r->
+     requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()))
+     val o=JSONObject(r.body?.string().orEmpty());AiReply(o.optString("answer"),o.optString("command",""),o.optString("proposalId"),o.optString("intent","execute"))
+   }
+ }
+ fun executeProposal(token:String,proposalId:String,command:String,deviceId:String,deviceName:String):Result<ExecutionResult> = requestResult{
+   val b=JSONObject().put("proposalId",proposalId).put("command",command).put("mode","operacao").put("deviceId",deviceId).put("deviceName",deviceName).toString().toRequestBody(json)
+   val q=authorized("/ai/agent/execute",token).post(b).build()
+   http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val o=JSONObject(r.body?.string().orEmpty());ExecutionResult(o.optString("commandId"),o.optString("status"))}
+ }
+ fun emergencyStop(token:String,stopped:Boolean):Result<Boolean> = requestResult{
+   val b=JSONObject().put("stopped",stopped).toString().toRequestBody(json)
+   val q=authorized("/security/emergency-stop",token).post(b).build()
+   http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));JSONObject(r.body?.string().orEmpty()).optBoolean("stopped")}
+ }
+ fun emergencyState(token:String):Result<Boolean> = getWithRetry{
+   val q=authorized("/security/emergency-stop",token).get().build()
+   http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));JSONObject(r.body?.string().orEmpty()).optBoolean("stopped")}
+ }
  fun aiHistory(token:String):Result<List<AiHistoryItem>> = getWithRetry{val q=authorized("/ai/agent/history",token).get().build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val a=JSONObject(r.body?.string().orEmpty()).optJSONArray("history")?:return@use emptyList();buildList{for(i in 0 until a.length()){val o=a.getJSONObject(i);add(AiHistoryItem(o.optString("role"),o.optString("content"),o.optString("mode"),o.optString("createdAt")))}}}}
  fun sendCommand(token:String,command:String,mode:String,deviceId:String,imageBase64:String?=null,owner:Boolean=false):Result<CommandResult> = requestResult{val b=JSONObject().put("command",command).put("mode",mode).put("deviceId",deviceId).put("scope","somente_o_solicitado").put("preservar_demais_configuracoes",true).apply{if(imageBase64!=null)put("imageBase64",imageBase64)}.toString().toRequestBody(json);val endpoint=if(owner)"/owner/commands" else "/commands";val q=authorized(endpoint,token).post(b).build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val o=JSONObject(r.body?.string().orEmpty());val id=o.optString("id");if(id.isBlank())error("Backend não retornou o ID do comando.");CommandResult(id,o.optString("status"),o.optString("message"))}}
  fun commands(token:String):Result<List<CommandResult>> = getWithRetry{val q=authorized("/commands",token).get().build();http.newCall(q).execute().use{r->requireAuthState(r);if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val a=JSONObject(r.body?.string().orEmpty()).optJSONArray("commands")?:return@use emptyList();buildList{for(i in 0 until a.length()){val o=a.getJSONObject(i);add(CommandResult(o.optString("id"),o.optString("status"),o.optString("message",o.optString("command",""))))}}}}
@@ -61,7 +82,8 @@ data class AuthResult(val token:String,val customerId:String,val email:String,va
 data class PlanInfo(val id:String,val name:String,val price:Double,val description:String)
 data class SignupCheckout(val signupId:String,val signupToken:String,val plan:String,val amount:Double,val checkoutUrl:String)
 data class SignupStatus(val status:String,val token:String?,val customerId:String?,val email:String?,val plan:String)
-data class AiReply(val answer:String,val actions:List<String>,val command:String,val shouldExecute:Boolean,val executionStatus:String)
+data class AiReply(val answer:String,val command:String,val proposalId:String,val intent:String)
+data class ExecutionResult(val commandId:String,val status:String)
 data class AiHistoryItem(val role:String,val content:String,val mode:String,val createdAt:String)
 data class SubscriptionStatus(val plan:String,val status:String,val currentPeriodEnd:String)
 data class CommandResult(val id:String,val status:String,val message:String)
