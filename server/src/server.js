@@ -582,6 +582,7 @@ app.post('/ai/agent/chat', auth, async (req,res) => {
   }
 
   const proposalId=crypto.randomUUID();
+  await query('insert into ai_proposals(id,tenant_id,user_id,mode,command,reason,intent) values($1,$2,$3,$4,$5,$6,$7)',[proposalId,req.user.tenant_id,req.user.sub,mode,proposal.command,proposal.reason,proposal.intent]);
   if(req.user.role!=='OWNER') await query('insert into ai_conversations(user_id,tenant_id,mode,role,content) values($1,$2,$3,\'user\',$4),($1,$2,$3,\'assistant\',$5)',[req.user.sub,req.user.tenant_id,mode,message,JSON.stringify({...proposal,proposalId})]);
   return res.json({ok:true,proposalId,...proposal,execution:{status:'not_requested'},mode});
 });
@@ -602,7 +603,14 @@ app.post('/ai/agent/execute',auth,async(req,res)=>{
     const commandId=crypto.randomUUID();
     const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId,actorUserId,type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode:'operacao',deviceId,userId:actorUserId,actorRole:String(req.user.role),proposalId},idempotencyKey:'ai-command-'+commandId});
     return res.status(202).json({ok:true,proposalId,commandId,executionId:result.actionId,status:result.status});
-  }catch(e){console.error('[ai/execute]',e.message);return errorJson(res,409,'Proposta rejeitada pelo Policy Engine.','POLICY_DENIED');}
+  }catch(e){
+    console.error('[ai/execute]',e.message);
+    const code=String(e.message||'');
+    if(code==='EMERGENCY_STOP') return errorJson(res,409,'EMERGENCY_STOP ativo.','EMERGENCY_STOP');
+    if(code==='DEVICE_NOT_OWNED') return errorJson(res,403,'Dispositivo não pertence à conta.','DEVICE_NOT_OWNED');
+    if(code==='PROPOSAL_INVALID') return errorJson(res,409,'Proposta inválida, expirada ou já executada.','PROPOSAL_INVALID');
+    return errorJson(res,409,'Proposta rejeitada pelo Policy Engine.','POLICY_DENIED');
+  }
 });
 
 app.get('/ai/agent/history',auth,async(req,res)=>{if(req.user.role==='OWNER')return res.json({ok:true,history:[]});const rows=(await query('select role,content,mode,created_at as "createdAt" from ai_conversations where user_id=$1 order by created_at desc limit 100',[req.user.sub])).rows.reverse();res.json({ok:true,history:rows});});
