@@ -389,7 +389,8 @@ app.post('/owner/devices/register', auth, ownerOnly, async (req, res) => {
       userId:req.user.sub,
       deviceId:id,
       mode,
-      deviceName:name
+      deviceName:name,
+      allowRebind:true
     });
     return res.status(200).json({ok:true,...result});
   } catch(e) {
