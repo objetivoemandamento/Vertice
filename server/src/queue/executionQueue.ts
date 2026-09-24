@@ -22,14 +22,17 @@ export async function enqueueExecution(intent: ActionIntent): Promise<{actionId:
       const mode=String(p.mode||"");
       const userId=String(p.userId||intent.actorUserId);
       const proposalId=String(p.proposalId||"");
-      if(!commandId||!deviceId||!command||mode!=="operacao"||!proposalId||userId!==intent.actorUserId) throw new Error("COMMAND_FIELDS_INVALID");
+      if(!commandId||!deviceId||!command||!mode||userId!==intent.actorUserId) throw new Error("COMMAND_FIELDS_INVALID");
       const stop=(await client.query("select emergency_stop from tenants where id=$1 for update",[intent.tenantId])).rows[0]?.emergency_stop;
       if(stop) throw new Error("EMERGENCY_STOP");
       const device=(await client.query("select user_id,tenant_id,mode from devices where id=$1 for update",[deviceId])).rows[0];
-      if(!device||String(device.tenant_id)!==String(intent.tenantId)||String(device.user_id)!==userId||String(device.mode)!=="operacao") throw new Error("DEVICE_NOT_OWNED");
-      const proposal=(await client.query("select id,command,mode,consumed_at from ai_proposals where id=$1 and tenant_id=$2 and user_id=$3 for update",[proposalId,intent.tenantId,userId])).rows[0];
-      if(!proposal||proposal.consumed_at||String(proposal.mode)!==mode||String(proposal.command)!==command) throw new Error("PROPOSAL_INVALID");
-      await client.query("update ai_proposals set consumed_at=now() where id=$1",[proposalId]);
+      if(!device||String(device.tenant_id)!==String(intent.tenantId)||String(device.user_id)!==userId) throw new Error("DEVICE_NOT_OWNED");
+      if(String(device.mode)!==mode) throw new Error("DEVICE_MODE_MISMATCH");
+      if(proposalId){
+        const proposal=(await client.query("select id,command,mode,consumed_at from ai_proposals where id=$1 and tenant_id=$2 and user_id=$3 for update",[proposalId,intent.tenantId,userId])).rows[0];
+        if(!proposal||proposal.consumed_at||String(proposal.mode)!==mode||String(proposal.command)!==command) throw new Error("PROPOSAL_INVALID");
+        await client.query("update ai_proposals set consumed_at=now() where id=$1",[proposalId]);
+      }
       await client.query(
         "insert into commands(id,user_id,tenant_id,device_id,mode,command,status,created_at,updated_at) values($1,$2,$3,$4,$5,$6,'created',now(),now()) on conflict(id) do nothing",
         [commandId,userId,intent.tenantId,deviceId,mode,command]
