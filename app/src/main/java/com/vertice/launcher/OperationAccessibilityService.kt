@@ -21,6 +21,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import kotlin.math.min
 
 /** VÉRTICE real Android operator: objetivo -> observar -> agir -> validar -> próxima ação. */
@@ -74,12 +77,12 @@ class OperationAccessibilityService : AccessibilityService() {
 
     private suspend fun executeCommand(token: String, deviceId: String, command: QueuedCommand) {
         val safety = EmergencyState.snapshot(this)
-        if (safety.stopped) {
+        if (safety.stopped || serverEmergencyStopped(token)) {
             runCatching { api.updateCommandStatus(token, command.id, "cancelled", "Execução bloqueada pelo botão de emergência.", deviceId) }
             return
         }
         api.updateCommandStatus(token, command.id, "executing", "Execução física iniciada.", deviceId)
-        val result = performCommandPlan(command.command, safety.generation)
+        val result = performCommandPlan(token, command.command, safety.generation)
         val status = when {
             EmergencyState.isStopped(this) -> "cancelled"
             EmergencyState.generation(this) != safety.generation -> "cancelled"
@@ -90,30 +93,30 @@ class OperationAccessibilityService : AccessibilityService() {
             .onFailure { e -> Log.e(TAG, "Status ${command.id}: ${e.message}") }
     }
 
-    private suspend fun performCommandPlan(raw: String, expectedGeneration: Long): Pair<Boolean, String> {
-        if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+    private suspend fun performCommandPlan(token: String, raw: String, expectedGeneration: Long): Pair<Boolean, String> {
+        if (!canContinue(token, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
         val text = raw.trim()
         if (text.isBlank()) return false to "Comando vazio."
         val steps = text.split(Regex("\\s+(?:e|depois|então|entao)\\s+"))
             .map(String::trim).filter(String::isNotBlank).take(MAX_PLAN_STEPS)
         val results = mutableListOf<String>()
         for ((index, step) in steps.withIndex()) {
-            if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência após $index passo(s)."
+            if (!canContinue(token, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência após $index passo(s)."
             val before = uiFingerprint()
             val result = withContext(Dispatchers.Main.immediate) { performSingleCommand(step) }
-            if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+            if (!canContinue(token, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
             results += result.second
             if (!result.first) return false to "Passo ${index + 1} falhou: ${result.second}"
             if (index < steps.lastIndex) {
-                waitForUiProgress(before, 2500L, expectedGeneration)
-                if (!EmergencyState.canContinue(this, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
+                waitForUiProgress(token, before, 2500L, expectedGeneration)
+                if (!canContinue(token, expectedGeneration)) return false to "Execução interrompida pelo botão de emergência."
                 delay(350L)
             }
         }
         return true to results.joinToString(" ")
     }
 
-    private fun performSingleCommand(raw: String): Pair<Boolean, String> {
+    private suspend fun performSingleCommand(raw: String): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val text = raw.trim(); val lower = text.lowercase()
         if (text.isBlank()) return false to "Comando vazio."
@@ -185,7 +188,7 @@ class OperationAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun clickBySemanticTarget(label: String): Boolean {
+    private suspend fun clickBySemanticTarget(label: String): Boolean {
         if (EmergencyState.isStopped(this)) return false
         val needle = normalize(label); val nodes = mutableListOf<AccessibilityNodeInfo>(); collectNodes(rootInActiveWindow, nodes)
         val target = nodes.firstOrNull { node ->
@@ -201,7 +204,7 @@ class OperationAccessibilityService : AccessibilityService() {
         for (i in 0 until node.childCount) { collectNodes(node.getChild(i), out); if (out.size >= MAX_NODES) return }
     }
 
-    private fun clickNode(node: AccessibilityNodeInfo): Boolean {
+    private suspend fun clickNode(node: AccessibilityNodeInfo): Boolean {
         if (EmergencyState.isStopped(this)) return false
         var current: AccessibilityNodeInfo? = node
         repeat(8) {
@@ -220,28 +223,34 @@ class OperationAccessibilityService : AccessibilityService() {
         return tapNodeCenter(node, true)
     }
 
-    private fun tapNodeCenter(node: AccessibilityNodeInfo, long: Boolean = false): Boolean {
+    private suspend fun tapNodeCenter(node: AccessibilityNodeInfo, long: Boolean = false): Boolean {
         val r = android.graphics.Rect(); node.getBoundsInScreen(r)
         return r.width() > 0 && r.height() > 0 && tapAt(r.exactCenterX(), r.exactCenterY(), long).first
     }
 
-    private fun tapAt(x: Float, y: Float, long: Boolean = false): Pair<Boolean, String> {
+    private suspend fun tapAt(x: Float, y: Float, long: Boolean = false): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val dm = resources.displayMetrics
         if (x < 0 || y < 0 || x > dm.widthPixels || y > dm.heightPixels) return false to "Coordenada fora da tela."
         val path = Path().apply { moveTo(x, y); lineTo(x + 1f, y + 1f) }
         val duration = if (long) 700L else 90L
-        val accepted = dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build(), null, null)
-        return if (accepted) true to if (long) "Pressão longa executada em ($x, $y)." else "Toque executado em ($x, $y)." else false to "O Android não aceitou o toque."
+        val completed = dispatchGestureAwait(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path, 0, duration)).build(),
+            duration + 1200L
+        )
+        return if (completed) true to if (long) "Pressão longa concluída em ($x, $y)." else "Toque concluído em ($x, $y)." else false to "O Android não concluiu o toque."
     }
 
-    private fun swipe(direction: String): Pair<Boolean, String> {
+    private suspend fun swipe(direction: String): Pair<Boolean, String> {
         if (EmergencyState.isStopped(this)) return false to "Execução bloqueada pelo botão de emergência."
         val dm = resources.displayMetrics; val w = dm.widthPixels.toFloat(); val h = dm.heightPixels.toFloat()
         val p = when (direction.lowercase()) { "cima" -> listOf(w/2,h*.78f,w/2,h*.22f); "esquerda" -> listOf(w*.80f,h/2,w*.20f,h/2); "direita" -> listOf(w*.20f,h/2,w*.80f,h/2); else -> listOf(w/2,h*.22f,w/2,h*.78f) }
         val path = Path().apply { moveTo(p[0],p[1]); lineTo(p[2],p[3]) }
-        val accepted = dispatchGesture(GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,450)).build(),null,null)
-        return if (accepted) true to "Deslize executado para $direction." else false to "O Android não aceitou o gesto."
+        val completed = dispatchGestureAwait(
+            GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,450)).build(),
+            1800L
+        )
+        return if (completed) true to "Deslize concluído para $direction." else false to "O Android não concluiu o gesto."
     }
 
     private fun pressEnter(): Pair<Boolean, String> {
@@ -275,7 +284,32 @@ class OperationAccessibilityService : AccessibilityService() {
     private fun findFocusedEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if (root==null)return null; if(root.isEditable&&root.isFocused)return root; for(i in 0 until root.childCount)findFocusedEditable(root.getChild(i))?.let{return it}; return null }
     private fun findFirstEditable(root: AccessibilityNodeInfo?): AccessibilityNodeInfo? { if(root==null)return null; if(root.isEditable&&root.isEnabled)return root; for(i in 0 until root.childCount)findFirstEditable(root.getChild(i))?.let{return it}; return null }
     private fun uiFingerprint(): String { val root=rootInActiveWindow?:return ""; val nodes=mutableListOf<AccessibilityNodeInfo>(); collectNodes(root,nodes); return root.packageName?.toString().orEmpty()+"|"+nodes.take(24).joinToString(";"){normalize(it.text?.toString().orEmpty())+":"+normalize(it.contentDescription?.toString().orEmpty())} }
-    private suspend fun waitForUiProgress(before:String,timeoutMs:Long,expectedGeneration:Long):Boolean { val end=System.currentTimeMillis()+timeoutMs; while(System.currentTimeMillis()<end){if(!EmergencyState.canContinue(this,expectedGeneration))return false;if(uiFingerprint()!=before)return true;delay(120)};return false }
+    private suspend fun waitForUiProgress(token:String,before:String,timeoutMs:Long,expectedGeneration:Long):Boolean {
+        val end=System.currentTimeMillis()+timeoutMs
+        while(System.currentTimeMillis()<end){
+            if(!canContinue(token,expectedGeneration))return false
+            if(uiFingerprint()!=before)return true
+            delay(120)
+        }
+        return false
+    }
+    private suspend fun canContinue(token:String,expectedGeneration:Long):Boolean {
+        if(!EmergencyState.canContinue(this,expectedGeneration))return false
+        return !serverEmergencyStopped(token)
+    }
+    private suspend fun serverEmergencyStopped(token:String):Boolean =
+        api.emergencyState(token).getOrElse { false }
+    private suspend fun dispatchGestureAwait(gesture:GestureDescription,timeoutMs:Long):Boolean =
+        withTimeoutOrNull(timeoutMs){
+            suspendCancellableCoroutine { continuation ->
+                val accepted=dispatchGesture(gesture,object:GestureResultCallback(){
+                    override fun onCompleted(gestureDescription:GestureDescription){if(continuation.isActive)continuation.resume(true)}
+                    override fun onCancelled(gestureDescription:GestureDescription){if(continuation.isActive)continuation.resume(false)}
+                },mainHandler)
+                if(!accepted && continuation.isActive)continuation.resume(false)
+                continuation.invokeOnCancellation { }
+            }
+        } ?: false
     private fun normalize(value:String):String=value.trim().lowercase().replace(Regex("\\s+")," ")
 
     override fun onDestroy(){scope.cancel();serviceJob.cancel();mainHandler.removeCallbacksAndMessages(null);super.onDestroy()}
