@@ -53,7 +53,7 @@ jobs:
       - name: Apply base schema and Zero-Trust migrations
         working-directory: .
         run: |
-          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "create role authenticated nologin; create schema if not exists auth; create or replace function auth.uid() returns uuid language sql stable as \$\$ select nullif(current_setting('app.user_id',true),'')::uuid \$\$;" 
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "create role authenticated nologin; create role anon nologin; create schema if not exists auth; create or replace function auth.uid() returns uuid language sql stable as \$\$ select nullif(current_setting('app.user_id',true),'')::uuid \$\$;" 
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/db/schema.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_zero_trust_kernel.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_staging_hardening.sql
