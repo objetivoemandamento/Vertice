@@ -34,6 +34,10 @@ export const executionWorker = new Worker("vertice-execution", async job => {
   const leased = await acquireLease(intent.tenantId,intent.actionId);
   if (!leased) throw new UnrecoverableError("TASK_LEASE_NOT_ACQUIRED");
   try {
+    if (intent.resource==="command" && intent.operation==="create") {
+      await finishTask(intent.actionId,intent.tenantId,"completed");
+      return { commandId:String(intent.payload.commandId||""), status:"queued" };
+    }
     const result = await executeThroughConnector(intent);
     await finishTask(intent.actionId,intent.tenantId,"completed");
     return result;
