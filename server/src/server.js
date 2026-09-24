@@ -12,7 +12,7 @@ const { enrollMfa, enableMfa, verifyEnabledMfa } = require('./security/mfa');
 const { issuePaymentCapability, verifyPaymentCapability } = require('./security/paymentCapability');
 const { safeError, safeLog } = require('./observability/redaction');
 
-const app = express(); // execution-security audit
+const app = express(); // execution-security audit pass 2
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
