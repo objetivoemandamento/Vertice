@@ -143,7 +143,11 @@ private fun VerticeApp() {
             TextButton(onClick=onLogout){Text("Sair")}
         }
         Spacer(Modifier.height(6.dp))
-        Button(onClick={toggleEmergency()},Modifier.fillMaxWidth(),enabled=!busy){Text(if(emergency)"▶ RETOMAR AUTONOMIA" else "■ EMERGÊNCIA • PARAR AUTONOMIA")}
+        if(role=="OWNER"){
+            Button(onClick={toggleEmergency()},Modifier.fillMaxWidth(),enabled=!busy){Text(if(emergency)"▶ RETOMAR AUTONOMIA" else "■ EMERGÊNCIA • PARAR AUTONOMIA")}
+        }else{
+            Text("EMERGENCY_STOP: somente OWNER pode alterar a trava do tenant.",fontSize=12.sp,fontWeight=FontWeight.SemiBold)
+        }
         Text(if(emergency)"Estado: AUTONOMIA BLOQUEADA" else "Estado: AUTONOMIA ATIVA",fontSize=12.sp,fontWeight=FontWeight.SemiBold)
         if(showHistory)Card(Modifier.fillMaxWidth()){Column(Modifier.padding(10.dp)){Text("Histórico salvo",fontWeight=FontWeight.Bold);Text("As conversas ficam salvas neste aparelho.");TextButton(onClick={history.clear();chat=listOf(ChatLine(false,"Histórico limpo. VÉRTICE ativo."));showHistory=false}){Text("LIMPAR HISTÓRICO")}}}
         Spacer(Modifier.height(8.dp))
