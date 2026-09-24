@@ -121,7 +121,7 @@ function ownerOnly(req, res, next) {
 }
 const OWNER_SYSTEM_EMAIL = 'owner@system.vertice.local';
 
-async function registerOwnerDeviceNow({tenantId,userId,deviceId,mode,deviceName}) {
+async function registerDeviceNow({tenantId,userId,deviceId,mode,deviceName,allowRebind=false}) {
   const { evaluatePolicy } = require('./security/policyEngine');
   const intent = {
     actionId: crypto.randomUUID(),
@@ -143,6 +143,7 @@ async function registerOwnerDeviceNow({tenantId,userId,deviceId,mode,deviceName}
   if (!decision.allowed) throw new Error('POLICY_DENIED:' + decision.reason);
   const existing=(await query('select tenant_id from devices where id=$1',[String(deviceId)])).rows[0];
   if(existing && String(existing.tenant_id)!==String(tenantId)) throw new Error('DEVICE_CROSS_TENANT');
+  if(existing && String(existing.user_id || '')!==String(userId) && !allowRebind) throw new Error('DEVICE_NOT_OWNED');
   await query(
     `insert into devices(id,user_id,device_name,mode,last_seen_at)
      values($1,$2,$3,$4,now())
@@ -387,13 +388,13 @@ app.get('/me', auth, async (req, res) => {
 app.post('/devices/register', auth, async (req, res) => {
   const id=String(req.body?.deviceId||'').trim(),mode=String(req.body?.mode||'').trim(),name=String(req.body?.deviceName||'').trim().slice(0,100);
   if(!id||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'deviceId e mode são obrigatórios.');
-  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'device',resource:'device',operation:'create',payload:{action:'register_device',deviceId:id,deviceName:name,mode,userId:String(req.user.sub)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({ok:true,deviceId:id,mode,...result});}catch{return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');}
+  try{const result=await registerDeviceNow({tenantId:req.user.tenant_id,userId:req.user.sub,deviceId:id,mode,deviceName:name,allowRebind:req.user.role==='OWNER'});return res.status(200).json({ok:true,...result});}catch{return errorJson(res,403,'Registro de dispositivo rejeitado.','POLICY_DENIED');}
 });
 app.post('/owner/devices/register', auth, ownerOnly, async (req, res) => {
   const id=String(req.body?.deviceId||'').trim(),mode=String(req.body?.mode||'').trim(),name=String(req.body?.deviceName||'').trim().slice(0,100);
   if(!id||!['comando','operacao','monitoramento'].includes(mode))return errorJson(res,400,'deviceId e mode são obrigatórios.');
   try {
-    const result=await registerOwnerDeviceNow({
+    const result=await registerDeviceNow({
       tenantId:req.user.tenant_id,
       userId:req.user.sub,
       deviceId:id,
@@ -537,6 +538,10 @@ app.post('/ai/agent/chat', auth, async (req, res) => {
     return errorJson(res, 400, 'Mensagem ou modo inválido.');
   }
 
+  const deviceId = String(req.body?.deviceId || '').trim();
+  const emergencyStopped = req.body?.emergencyStopped === true;
+  if (mode === 'operacao' && !deviceId) return errorJson(res, 400, 'deviceId é obrigatório no modo OPERAÇÃO.');
+
   const key = String(
     process.env.VERTICE_AI_API_KEY ||
     process.env.GROQ_API_KEY ||
@@ -646,6 +651,29 @@ Formato:
     }
   }
 
+  let execution = { requested: false, status: 'not_requested' };
+  if (mode === 'operacao' && aiResult.shouldExecute && !emergencyStopped) {
+    try {
+      const tenantId = String(req.user.tenant_id || '');
+      const actorUserId = String(req.user.sub || '');
+      if (req.user.role === 'OWNER') {
+        await registerDeviceNow({ tenantId, userId: actorUserId, deviceId, mode: 'operacao', deviceName: String(req.body?.deviceName || 'Android • OPERAÇÃO').slice(0, 100), allowRebind: true });
+      } else {
+        const d = (await query('select user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,tenantId])).rows[0];
+        if (!d || String(d.user_id) !== actorUserId) return errorJson(res,403,'Dispositivo não pertence à conta.','DEVICE_NOT_OWNED');
+        if (String(d.mode) !== 'operacao') return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.','DEVICE_MODE_MISMATCH');
+      }
+      const commandId=crypto.randomUUID();
+      const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId,actorUserId,type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command:aiResult.command,mode:'operacao',deviceId,userId:actorUserId,actorRole:String(req.user.role)},idempotencyKey:'ai-command-'+commandId});
+      execution={requested:true,commandId,executionId:result.actionId,status:result.status};
+    } catch(e) {
+      console.error('[ai/execution]',e.message);
+      return errorJson(res,409,'A intenção foi reconhecida, mas não pôde ser enfileirada para execução.','EXECUTION_ENQUEUE_FAILED');
+    }
+  } else if (mode === 'operacao' && emergencyStopped) {
+    execution={requested:false,status:'blocked_emergency'};
+  }
+
   if (req.user.role !== 'OWNER') {
     await query(
       `insert into ai_conversations
@@ -678,7 +706,8 @@ Formato:
     execution: {
       governance: 'backend_policy_engine',
       risk: 'backend_controlled',
-      autonomy: 'command_requested'
+      autonomy: execution.requested ? 'command_enqueued_by_backend' : 'command_not_enqueued',
+      ...execution
     },
     mode
   });
