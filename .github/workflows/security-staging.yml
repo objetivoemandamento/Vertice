@@ -1,4 +1,5 @@
 name: vertice-security-staging
+# Execution permission audit: staging runs the full operational migration chain.
 on:
   push:
     branches: ["feat/zero-trust-kernel-v2","main"]
@@ -52,10 +53,17 @@ jobs:
       - name: Apply base schema and Zero-Trust migrations
         working-directory: .
         run: |
-          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "create role authenticated nologin; create schema if not exists auth; create or replace function auth.uid() returns uuid language sql stable as \$\$ select nullif(current_setting('app.user_id',true),'')::uuid \$\$;" 
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "create role authenticated nologin; create role anon nologin; create schema if not exists auth; create or replace function auth.uid() returns uuid language sql stable as \$\$ select nullif(current_setting('app.user_id',true),'')::uuid \$\$;" 
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/db/schema.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_zero_trust_kernel.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260922_staging_hardening.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260923_operational_execution.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260923_security_hardening.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260923_ai_proposals.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260924_security_function_acl.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260924_function_search_path.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260924_rls_function_grants.sql
+          docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -f /dev/stdin < server/migrations/20260924023000_private_rls_function.sql
           docker compose -f docker-compose.staging.yml exec -T postgres psql -v ON_ERROR_STOP=1 -U vertice_admin -d vertice_staging -c "alter role vertice_app nosuperuser nobypassrls nocreaterole nocreatedb; grant usage on schema public to vertice_app; grant select,insert,update,delete on all tables in schema public to vertice_app; grant usage,select on all sequences in schema public to vertice_app;"
           docker compose -f docker-compose.staging.yml up -d --build backend worker
           for i in $(seq 1 60); do
