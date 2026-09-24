@@ -16,7 +16,7 @@ jobs:
           node-version: 22
       - name: Install backend
         working-directory: server
-        run: npm ci --ignore-scripts
+        run: npm install --ignore-scripts
       - name: Syntax
         working-directory: server
         run: npm run check
