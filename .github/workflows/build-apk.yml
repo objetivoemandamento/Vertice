@@ -27,7 +27,7 @@ jobs:
       - name: Production HTTP load smoke
         run: |
           node <<'NODE'
-          const {performance}=require('node:perf_hooks');
+          const {performance}=await import('node:perf_hooks');
           const url='https://vertice-backend-8gj5.onrender.com/health';
           const concurrency=20, perWorker=10, timeoutMs=15000;
           const out=[];
@@ -38,7 +38,7 @@ jobs:
             finally{clearTimeout(timer);}
           }
           async function worker(){for(let i=0;i<perWorker;i++)await one();}
-          const t0=performance.now(); await Promise.all(Array.from({length:concurrency},worker));
+          await Promise.all(Array.from({length:concurrency},worker));
           const lat=out.map(x=>x.ms).sort((a,b)=>a-b), bad=out.filter(x=>x.status==='ERR'||x.status>=500);
           const p=q=>lat[Math.min(lat.length-1,Math.floor(q*(lat.length-1)))];
           const s={requests:out.length,concurrency,bad:bad.length,avg_ms:lat.reduce((a,b)=>a+b,0)/lat.length,p50_ms:p(.5),p95_ms:p(.95),p99_ms:p(.99),max_ms:p(1),statuses:Object.fromEntries([...new Set(out.map(x=>x.status))].map(v=>[v,out.filter(x=>x.status===v).length]))};
