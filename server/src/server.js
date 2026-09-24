@@ -488,7 +488,7 @@ app.post('/commands/:commandId/status',auth,async(req,res)=>{
     });
     return res.json({ok:true,id,status});
   }catch(e){
-    return errorJson(res,e.status||500,e.status===403?'Comando não pertence ao tenant/usuário.':e.status===409?'Transição de comando inválida.':'Falha ao atualizar comando.');
+    return errorJson(res,e.status||500,e.status===403?'Comando não pertence ao tenant/usuário.':e.status===409?'Transição de comando inválida.':'Falha ao atualizar comando.',e.status===403?'TENANT_ISOLATION':e.status===409?'INVALID_COMMAND_TRANSITION':undefined);
   }
 });
 
