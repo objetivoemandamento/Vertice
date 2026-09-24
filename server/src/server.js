@@ -432,10 +432,10 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
     const d=(await query('select user_id,mode,tenant_id from devices where id=$1',[deviceId])).rows[0];
     if(!d)return errorJson(res,403,'Dispositivo não está registrado para o OWNER.','DEVICE_NOT_REGISTERED');
     if(String(d.tenant_id)!==String(req.user.tenant_id))return errorJson(res,403,'Dispositivo pertence a outro tenant.','DEVICE_CROSS_TENANT');
-    if(String(d.user_id)!==String(req.user.sub)) {
+    if(String(d.user_id)!==String(req.user.sub) || String(d.mode)!==mode) {
       await query('update devices set user_id=$1,mode=$2,last_seen_at=now() where id=$3',[String(req.user.sub),mode,deviceId]);
     }
-    if(mode==='operacao'&&String(d.mode)!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
+    if(mode==='operacao' && mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
     const commandId=crypto.randomUUID();
     const result=await enqueueExecution({
       actionId:crypto.randomUUID(),
