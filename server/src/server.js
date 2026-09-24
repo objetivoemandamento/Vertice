@@ -141,6 +141,8 @@ async function registerOwnerDeviceNow({tenantId,userId,deviceId,mode,deviceName}
   };
   const decision = evaluatePolicy(intent);
   if (!decision.allowed) throw new Error('POLICY_DENIED:' + decision.reason);
+  const existing=(await query('select tenant_id from devices where id=$1',[String(deviceId)])).rows[0];
+  if(existing && String(existing.tenant_id)!==String(tenantId)) throw new Error('DEVICE_CROSS_TENANT');
   await query(
     `insert into devices(id,user_id,device_name,mode,last_seen_at)
      values($1,$2,$3,$4,now())
@@ -426,11 +428,29 @@ app.post('/owner/commands', auth, ownerOnly, async (req,res) => {
   if (!(await activeSubscription(req.user.sub))) return errorJson(res,402,'Assinatura não está ativa.');
   const command=String(req.body?.command||'').trim(), mode=String(req.body?.mode||''), deviceId=String(req.body?.deviceId||'').trim();
   if(!command||command.length>2000||!['comando','operacao','monitoramento'].includes(mode)||!deviceId)return errorJson(res,400,'Comando, modo ou deviceId inválido.');
-  const d=(await query('select user_id,mode from devices where id=$1 and tenant_id=$2',[deviceId,req.user.tenant_id])).rows[0];
-  if(!d||d.user_id!==req.user.sub)return errorJson(res,403,'Dispositivo não pertence à conta.');
-  if(mode==='operacao'&&d.mode!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
-  const commandId=crypto.randomUUID();
-  try{const result=await enqueueExecution({actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id),actorUserId:String(req.user.sub),type:'command',resource:'command',operation:'create',payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub),actorRole:String(req.user.role)},idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())});return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:result.status==='awaiting_mfa'?'Aguardando MFA.':'Comando recebido pelo VÉRTICE.'});}catch{return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');}
+  try {
+    const d=(await query('select user_id,mode,tenant_id from devices where id=$1',[deviceId])).rows[0];
+    if(!d)return errorJson(res,403,'Dispositivo não está registrado para o OWNER.','DEVICE_NOT_REGISTERED');
+    if(String(d.tenant_id)!==String(req.user.tenant_id))return errorJson(res,403,'Dispositivo pertence a outro tenant.','DEVICE_CROSS_TENANT');
+    if(String(d.user_id)!==String(req.user.sub)) {
+      await query('update devices set user_id=$1,mode=$2,last_seen_at=now() where id=$3',[String(req.user.sub),mode,deviceId]);
+    }
+    if(mode==='operacao'&&String(d.mode)!=='operacao')return errorJson(res,409,'O dispositivo não está em OPERAÇÃO.');
+    const commandId=crypto.randomUUID();
+    const result=await enqueueExecution({
+      actionId:crypto.randomUUID(),
+      tenantId:String(req.user.tenant_id),
+      actorUserId:String(req.user.sub),
+      type:'command',
+      resource:'command',
+      operation:'create',
+      payload:{action:'create_command',commandId,command,mode,deviceId,userId:String(req.user.sub),actorRole:'OWNER'},
+      idempotencyKey:String(req.headers['idempotency-key']||crypto.randomUUID())
+    });
+    return res.status(202).json({id:commandId,status:result.status,executionId:result.actionId,message:'Comando recebido pelo VÉRTICE.'});
+  } catch(e) {
+    return errorJson(res,403,'Comando rejeitado pelo Policy Engine.','POLICY_DENIED');
+  }
 });
 
 app.get('/commands',auth,async(req,res)=>{const cid=userId(req);if(!cid)return res.json({commands:[]});const rows=(await query('select id,device_id as "deviceId",mode,command,status,created_at as "createdAt" from commands where user_id=$1 order by created_at desc limit 50',[cid])).rows;res.json({commands:rows});});
