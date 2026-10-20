@@ -14,29 +14,6 @@ class VerticeApi(private val baseUrl:String){
  private val json="application/json; charset=utf-8".toMediaType()
  var onAuthError:(()->Unit)?=null
  var onSubscriptionError:(()->Unit)?=null
-
- fun marketplaceConnectUrl(token:String):Result<String> = requestResult {
-   val client=OkHttpClient.Builder().connectTimeout(12,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS)
-     .followRedirects(false).followSslRedirects(false).build()
-   val q=authorized("/integrations/mercadolivre/connect",token).get().build()
-   client.newCall(q).execute().use { r ->
-     requireAuthState(r)
-     if(r.code!=302) error(readError(r.code,r.body?.string()))
-     r.header("Location")?.takeIf{it.startsWith("https://auth.mercadolivre.com.br/")} ?: error("O servidor não retornou a URL segura de autorização.")
-   }
- }
- fun marketplaceStatus(token:String):Result<String> = marketplaceGet(token,"/integrations/mercadolivre/status")
- fun marketplaceItems(token:String):Result<String> = marketplaceGet(token,"/integrations/mercadolivre/items?limit=20&offset=0")
- fun marketplaceOrders(token:String):Result<String> = marketplaceGet(token,"/integrations/mercadolivre/orders?limit=20&offset=0")
- private fun marketplaceGet(token:String,path:String):Result<String> = requestResult {
-   val q=authorized(path,token).get().build()
-   http.newCall(q).execute().use { r ->
-     requireAuthState(r)
-     val body=r.body?.string().orEmpty()
-     if(!r.isSuccessful) error(readError(r.code,body))
-     body
-   }
- }
  fun login(login:String,password:String):Result<AuthResult> = requestResult{val b=JSONObject().put("login",login).put("email",login).put("password",password).toString().toRequestBody(json);val q=Request.Builder().url("${clean()}/auth/login").post(b).build();http.newCall(q).execute().use{r->if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val o=JSONObject(r.body?.string().orEmpty());val c=o.optJSONObject("customer")?:error("Resposta de login inválida.");AuthResult(o.getString("token"),c.getString("id"),c.optString("email",login),o.optString("role","CUSTOMER"))}}
  fun plans():Result<List<PlanInfo>> = getWithRetry{val q=Request.Builder().url("${clean()}/public/plans").get().build();http.newCall(q).execute().use{r->if(!r.isSuccessful)error(readError(r.code,r.body?.string()));val a=JSONObject(r.body?.string().orEmpty()).optJSONArray("plans")?:error("Planos indisponíveis.");buildList{for(i in 0 until a.length()){val o=a.getJSONObject(i);add(PlanInfo(o.optString("id"),o.optString("name"),o.optDouble("price"),o.optString("description")))}}}}
  fun startSignup(email:String,password:String,plan:String):Result<SignupCheckout> = requestResult{
