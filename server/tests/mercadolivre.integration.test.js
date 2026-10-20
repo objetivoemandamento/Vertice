@@ -97,29 +97,29 @@ test('OAuth connection, status, items, orders and paused listing flow', async t 
   const token = jwt.sign({ sub: context.userId, tenant_id: context.tenantId, role: 'CUSTOMER' }, secret, { issuer: 'vertice', audience: 'vertice-app', expiresIn: '5m' });
   const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-  const connect = await fetch(base + '/connect', { headers });
+  const connect = await originalFetch(base + '/connect', { headers });
   assert.equal(connect.status, 302);
   const state = new URL(connect.headers.get('location')).searchParams.get('state');
   assert.ok(state);
 
-  const callback = await fetch(base + '/callback?code=test-code&state=' + encodeURIComponent(state));
+  const callback = await originalFetch(base + '/callback?code=test-code&state=' + encodeURIComponent(state));
   assert.equal(callback.status, 200);
   assert.equal((await callback.json()).connected, true);
   assert.ok(connectionRow.access_token_enc !== 'access-test');
 
-  const status = await fetch(base + '/status', { headers });
+  const status = await originalFetch(base + '/status', { headers });
   assert.equal((await status.json()).connected, true);
 
-  const me = await fetch(base + '/me', { headers });
+  const me = await originalFetch(base + '/me', { headers });
   assert.equal((await me.json()).id, 123456);
 
-  const items = await fetch(base + '/items', { headers });
+  const items = await originalFetch(base + '/items', { headers });
   assert.deepEqual((await items.json()).results, ['MLB1']);
 
-  const orders = await fetch(base + '/orders', { headers });
+  const orders = await originalFetch(base + '/orders', { headers });
   assert.equal((await orders.json()).results[0].id, 789);
 
-  const listing = await fetch(base + '/items', {
+  const listing = await originalFetch(base + '/items', {
     method: 'POST', headers,
     body: JSON.stringify({
       title: 'Produto de teste VÉRTICE', categoryId: 'MLB1234', price: 100,
@@ -129,6 +129,6 @@ test('OAuth connection, status, items, orders and paused listing flow', async t 
   assert.equal(listing.status, 201);
   assert.equal((await listing.json()).item.status, 'paused');
 
-  const unauthorized = await fetch(base + '/status');
+  const unauthorized = await originalFetch(base + '/status');
   assert.equal(unauthorized.status, 401);
 });
