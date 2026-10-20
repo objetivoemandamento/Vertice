@@ -1,6 +1,6 @@
 # Mercado Livre no VÉRTICE
 
-Esta integração é adicionada como módulo independente, sem substituir o login, o aplicativo Android, a fila de execução ou os checkouts existentes de Mercado Pago e Stripe.
+Esta integração é adicionada como módulo independente, com painel web responsivo em `web/index.html`, sem substituir o login, a fila de execução ou os checkouts existentes de Mercado Pago e Stripe. O painel é servido pelo próprio backend Express no caminho `/` e funciona no navegador do celular ou computador; não exige APK.
 
 ## Configuração
 
@@ -13,14 +13,15 @@ Esta integração é adicionada como módulo independente, sem substituir o logi
    - `MERCADOLIVRE_TOKEN_ENCRYPTION_KEY`
 4. Gere uma chave AES de 32 bytes e armazene-a em Base64. Exemplo local: `openssl rand -base64 32`. Não coloque a chave nem os tokens no GitHub.
 5. Aplique `server/migrations/20261020_marketplace_connections.sql` no PostgreSQL antes de habilitar a integração.
-6. Faça o deploy do backend. O APK não precisa de rebuild para usar as novas rotas do servidor, desde que já aponte para esse backend.
+6. Faça o deploy do backend e da pasta `web/` no mesmo serviço. Abra a URL pública do backend para usar o painel web.
 
 ## Rotas
 
 Todas as rotas abaixo usam o prefixo `/integrations/mercadolivre`.
 
+- `GET /connect-url` — autenticada; devolve a URL OAuth para o painel web abrir a autorização no navegador.
 - `GET /connect` — autenticada; redireciona o usuário para autorizar a conta do Mercado Livre.
-- `GET /callback` — callback OAuth; valida o estado assinado e armazena tokens criptografados.
+- `GET /callback` — callback OAuth; valida o estado assinado, armazena tokens criptografados e retorna ao painel web.
 - `GET /status` — autenticada; informa se a conta está conectada.
 - `GET /me` — autenticada; consulta o perfil do vendedor.
 - `GET /items?limit=20&offset=0` — autenticada; consulta anúncios do vendedor.
