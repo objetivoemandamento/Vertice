@@ -19,3 +19,15 @@ test('web-first dashboard does not expose APK or Mercado Livre integration', () 
   assert.doesNotMatch(dashboard, /mercadolivre|mercado livre|download-apk/i);
   assert.doesNotMatch(backend, /download-apk|download\/vertice\.apk/);
 });
+
+const { normalizeDatabaseUrl } = require('../src/dbUrl');
+
+test('repairs only the known short Supabase database hostname', () => {
+  const input = 'postgresql://postgres:secret@postgres.tsiotzmtojalieelhaoe:5432/postgres';
+  const result = new URL(normalizeDatabaseUrl(input));
+  assert.equal(result.hostname, 'db.tsiotzmtojalieelhaoe.supabase.co');
+  assert.equal(result.username, 'postgres');
+  assert.equal(result.password, 'secret');
+  const other = 'postgresql://user:pass@db.example.com:5432/app';
+  assert.equal(new URL(normalizeDatabaseUrl(other)).hostname, 'db.example.com');
+});
