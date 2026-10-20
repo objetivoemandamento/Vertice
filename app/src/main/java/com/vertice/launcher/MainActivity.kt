@@ -118,9 +118,6 @@ private fun VerticeApp() {
     var status by remember{mutableStateOf("")}
     var showHistory by remember{mutableStateOf(false)}
     var emergency by remember{mutableStateOf(session.emergencyStop)}
-    var showMarketplace by remember{mutableStateOf(false)}
-    var marketplaceBusy by remember{mutableStateOf(false)}
-    var marketplaceData by remember{mutableStateOf("")}
 
     LaunchedEffect(token,mode){
         val stored=withContext(Dispatchers.IO){history.load()}
@@ -143,56 +140,7 @@ private fun VerticeApp() {
         Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
             Column(Modifier.weight(1f)){Text("VÉRTICE",fontSize=27.sp,fontWeight=FontWeight.Bold);Text("$role • ${mode.uppercase()}",fontSize=12.sp)}
             TextButton(onClick={showHistory=!showHistory}){Text("HISTÓRICO")}
-            TextButton(onClick={showMarketplace=!showMarketplace}){Text("MERCADO LIVRE")}
             TextButton(onClick=onLogout){Text("Sair")}
-        }
-        if(showMarketplace) {
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                    Text("MERCADO LIVRE", fontWeight=FontWeight.Bold, fontSize=18.sp)
-                    Text("Conecte a conta do vendedor para consultar anúncios e pedidos.", fontSize=12.sp)
-                    Spacer(Modifier.height(8.dp))
-                    Button(onClick={
-                        marketplaceBusy=true
-                        scope.launch {
-                            val result=withContext(Dispatchers.IO){api.marketplaceConnectUrl(token)}
-                            result.onSuccess { url ->
-                                runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                                    .onFailure { marketplaceData="Não foi possível abrir o navegador: ${it.message}" }
-                            }.onFailure { marketplaceData=it.message ?: "Falha ao iniciar conexão." }
-                            marketplaceBusy=false
-                        }
-                    }, Modifier.fillMaxWidth(), enabled=!marketplaceBusy) {
-                        Text(if(marketplaceBusy) "AGUARDE…" else "CONECTAR CONTA DO MERCADO LIVRE")
-                    }
-                    OutlinedButton(onClick={
-                        marketplaceBusy=true
-                        scope.launch {
-                            val statusResult=withContext(Dispatchers.IO){api.marketplaceStatus(token)}
-                            if(statusResult.isFailure) {
-                                marketplaceData=statusResult.exceptionOrNull()?.message ?: "Falha ao consultar conexão."
-                            } else {
-                                val statusJson=statusResult.getOrThrow()
-                                if(statusJson.contains("\"connected\":false")) {
-                                    marketplaceData="Conta ainda não conectada. Toque em CONECTAR CONTA DO MERCADO LIVRE e autorize o acesso."
-                                } else {
-                                    val itemsResult=withContext(Dispatchers.IO){api.marketplaceItems(token)}
-                                    val ordersResult=withContext(Dispatchers.IO){api.marketplaceOrders(token)}
-                                    marketplaceData="CONEXÃO\n$statusJson\n\nANÚNCIOS\n${itemsResult.getOrElse { it.message ?: "Falha ao consultar anúncios." }}\n\nPEDIDOS\n${ordersResult.getOrElse { it.message ?: "Falha ao consultar pedidos." }}"
-                                }
-                            }
-                            marketplaceBusy=false
-                        }
-                    }, Modifier.fillMaxWidth(), enabled=!marketplaceBusy) {
-                        Text(if(marketplaceBusy) "CONSULTANDO…" else "ATUALIZAR ANÚNCIOS E PEDIDOS")
-                    }
-                    if(marketplaceData.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        Text(marketplaceData, fontSize=10.sp, maxLines=12)
-                    }
-                }
-            }
-            Spacer(Modifier.height(8.dp))
         }
         Spacer(Modifier.height(6.dp))
         if(role=="OWNER"){
