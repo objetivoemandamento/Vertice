@@ -18,6 +18,7 @@ test('web dashboard contains the office and sales module', () => {
 test('web-first dashboard does not expose APK or Mercado Livre integration', () => {
   assert.doesNotMatch(dashboard, /mercadolivre|mercado livre|download-apk/i);
   assert.doesNotMatch(backend, /download-apk|download\/vertice\.apk/);
+  assert.match(backend, /AI_PROVIDER_UNAVAILABLE/);
 });
 
 const { normalizeDatabaseUrl } = require('../src/dbUrl');
