@@ -569,7 +569,9 @@ app.post('/ai/agent/chat', auth, async (req,res) => {
   if(!message||!['comando','operacao','monitoramento'].includes(mode)) return errorJson(res,400,'Mensagem ou modo inválido.');
 
   const key=String(process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'');
-  const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');
+  const model=String(process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini'));
+  const usesGroq=Boolean(process.env.GROQ_API_KEY)||/^(llama-|mixtral|gemma|qwen)/i.test(model);
+  const base=String(process.env.VERTICE_AI_BASE_URL||(usesGroq?'https://api.groq.com/openai/v1':key?'https://api.openai.com/v1':'')).replace(/\/$/,'');
   const systemInstruction='Retorne somente uma proposta JSON. A IA interpreta a intenção, mas não autoriza nem executa. Formato: {"command":"comando normalizado","reason":"ação pretendida","intent":"execute"}. Não invente credenciais ou segredos.';
   if ((!key || !base) && NODE_ENV === 'production') return errorJson(res,503,'Provedor de IA não configurado. Configure VERTICE_AI_API_KEY ou GROQ_API_KEY no servidor.','AI_PROVIDER_UNAVAILABLE');
 
@@ -577,7 +579,7 @@ app.post('/ai/agent/chat', auth, async (req,res) => {
 
   if(key&&base){
     try{
-      const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model:process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini'),temperature:0,messages:[{role:'system',content:systemInstruction},{role:'user',content:message}],response_format:{type:'json_object'}})},20000);
+      const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model,temperature:0,messages:[{role:'system',content:systemInstruction},{role:'user',content:message}],response_format:{type:'json_object'}})},20000);
       const raw=String(data?.choices?.[0]?.message?.content||'');
       const parsed=JSON.parse(raw);
       if(parsed&&typeof parsed==='object') proposal={command:String(parsed.command||message).slice(0,2000),reason:String(parsed.reason||'Intenção recebida pelo VÉRTICE.').slice(0,1000),intent:'execute'};
