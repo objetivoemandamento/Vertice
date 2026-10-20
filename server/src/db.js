@@ -1,7 +1,8 @@
 const { Pool } = require('pg');
+const { normalizeDatabaseUrl } = require('./dbUrl');
 const { AsyncLocalStorage } = require('node:async_hooks');
 
-const databaseUrl = String(process.env.DATABASE_URL || '').trim();
+const databaseUrl = normalizeDatabaseUrl(process.env.DATABASE_URL || '');
 if (!databaseUrl) throw new Error('DATABASE_URL é obrigatório para o backend VÉRTICE.');
 
 const tenantStorage = new AsyncLocalStorage();
