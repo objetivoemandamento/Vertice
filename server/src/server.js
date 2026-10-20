@@ -571,6 +571,8 @@ app.post('/ai/agent/chat', auth, async (req,res) => {
   const key=String(process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'');
   const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');
   const systemInstruction='Retorne somente uma proposta JSON. A IA interpreta a intenção, mas não autoriza nem executa. Formato: {"command":"comando normalizado","reason":"ação pretendida","intent":"execute"}. Não invente credenciais ou segredos.';
+  if ((!key || !base) && NODE_ENV === 'production') return errorJson(res,503,'Provedor de IA não configurado. Configure VERTICE_AI_API_KEY ou GROQ_API_KEY no servidor.','AI_PROVIDER_UNAVAILABLE');
+
   let proposal={command:message.slice(0,2000),reason:'Intenção recebida pelo VÉRTICE.',intent:'execute'};
 
   if(key&&base){
