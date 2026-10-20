@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -15,6 +16,8 @@ const { createMercadoLivreRouter } = require('./integrations/mercadolivreRoutes'
 
 const app = express(); // execution-security audit pass 3
 app.disable('x-powered-by');
+// VÉRTICE browser dashboard: all primary user interaction happens in the website.
+app.use(express.static(path.join(__dirname, '../../web'), { index: 'index.html', maxAge: '1h' }));
 app.set('trust proxy', 1);
 
 app.get(['/download-apk','/download/vertice.apk'], async (req, res) => {
