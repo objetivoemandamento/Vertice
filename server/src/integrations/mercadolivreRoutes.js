@@ -130,6 +130,45 @@ function createMercadoLivreRouter({ auth, jwt, jwtSecret, query, runWithTenantCo
     } catch (error) { return res.status(error.status || 502).json({ error: error.status === 409 ? error.message : 'Falha ao consultar anúncios.' }); }
   });
 
+  router.post('/items', auth, async (req, res) => {
+    const title = String(req.body?.title || '').trim();
+    const categoryId = String(req.body?.categoryId || '').trim();
+    const currencyId = String(req.body?.currencyId || 'BRL').trim().toUpperCase();
+    const condition = String(req.body?.condition || 'new').trim().toLowerCase();
+    const listingTypeId = String(req.body?.listingTypeId || 'gold_special').trim();
+    const price = Number(req.body?.price);
+    const availableQuantity = Number(req.body?.availableQuantity);
+    const pictures = Array.isArray(req.body?.pictures) ? req.body.pictures : [];
+    if (title.length < 10 || title.length > 60 || !categoryId ||
+        !Number.isFinite(price) || price <= 0 ||
+        !Number.isInteger(availableQuantity) || availableQuantity < 1 ||
+        !['new', 'used'].includes(condition) ||
+        pictures.length < 1 || pictures.length > 10 ||
+        pictures.some(p => !p || typeof p.source !== 'string' || !/^https:\/\//i.test(p.source))) {
+      return res.status(400).json({ error: 'Informe título (10–60 caracteres), categoria, preço, estoque, condição e de 1 a 10 imagens HTTPS.' });
+    }
+    try {
+      const ctx = { tenantId: String(req.user.tenant_id), userId: String(req.user.sub), role: String(req.user.role || 'CUSTOMER'), requestId: crypto.randomUUID() };
+      const linked = await connection(ctx);
+      const payload = {
+        title, category_id: categoryId, price, currency_id: currencyId,
+        available_quantity: availableQuantity, buying_mode: 'buy_it_now',
+        listing_type_id: listingTypeId, condition, pictures,
+        status: 'paused',
+        ...(Array.isArray(req.body?.attributes) ? { attributes: req.body.attributes } : {}),
+        ...(Array.isArray(req.body?.saleTerms) ? { sale_terms: req.body.saleTerms } : {})
+      };
+      const created = await apiRequest('/items', linked.accessToken, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return res.status(201).json({ ok: true, item: created, note: 'Anúncio criado pausado para revisão antes da publicação.' });
+    } catch (error) {
+      return res.status(error.status || 502).json({ error: error.status === 409 ? error.message : 'Não foi possível criar o anúncio. Confira categoria, atributos obrigatórios e permissões da conta.' });
+    }
+  });
+
   router.get('/orders', auth, async (req, res) => {
     const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
     const offset = Math.max(0, Number(req.query.offset || 0));
