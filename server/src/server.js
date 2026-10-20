@@ -11,6 +11,7 @@ const { enqueueExecution } = require('./queue/executionQueue');
 const { enrollMfa, enableMfa, verifyEnabledMfa } = require('./security/mfa');
 const { issuePaymentCapability, verifyPaymentCapability } = require('./security/paymentCapability');
 const { safeError, safeLog } = require('./observability/redaction');
+const { createMercadoLivreRouter } = require('./integrations/mercadolivreRoutes');
 
 const app = express(); // execution-security audit pass 3
 app.disable('x-powered-by');
@@ -277,6 +278,7 @@ app.use(cors(buildCorsOptions()));
 app.use(express.json({ limit: '8mb', strict: true }));
 app.use(buildRateLimiter(redis));
 app.use(tenantContextMiddleware(verifyAccess));
+app.use('/integrations/mercadolivre', createMercadoLivreRouter({ auth, jwt, jwtSecret: JWT_SECRET, query, runWithTenantContext }));
 
 app.get('/health', async (req, res) => {
   try {
