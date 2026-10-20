@@ -97,7 +97,7 @@ test('OAuth connection, status, items, orders and paused listing flow', async t 
   const token = jwt.sign({ sub: context.userId, tenant_id: context.tenantId, role: 'CUSTOMER' }, secret, { issuer: 'vertice', audience: 'vertice-app', expiresIn: '5m' });
   const headers = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-  const connect = await originalFetch(base + '/connect', { headers });
+  const connect = await originalFetch(base + '/connect', { headers, redirect: 'manual' });
   assert.equal(connect.status, 302);
   const state = new URL(connect.headers.get('location')).searchParams.get('state');
   assert.ok(state);
