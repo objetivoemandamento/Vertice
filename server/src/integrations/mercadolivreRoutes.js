@@ -75,6 +75,11 @@ function createMercadoLivreRouter({ auth, jwt, jwtSecret, query, runWithTenantCo
     }
   }
 
+  router.get('/connect-url', auth, (req, res) => {
+    try { return res.json({ url: authorizationUrl(stateToken(req.user)) }); }
+    catch (error) { return res.status(error.status || 503).json({ error: 'Integração do Mercado Livre não configurada.' }); }
+  });
+
   router.get('/connect', auth, (req, res) => {
     try { return res.redirect(302, authorizationUrl(stateToken(req.user))); }
     catch (error) { return res.status(error.status || 503).json({ error: 'Integração do Mercado Livre não configurada.' }); }
@@ -95,8 +100,7 @@ function createMercadoLivreRouter({ auth, jwt, jwtSecret, query, runWithTenantCo
       const context = { tenantId: String(payload.tenant_id), userId: String(payload.sub), role: 'CUSTOMER', requestId: crypto.randomUUID() };
       await saveTokens(context, tokens, me.id);
       const returnUrl = String(process.env.MERCADOLIVRE_SUCCESS_URL || '');
-      if (returnUrl) return res.redirect(303, returnUrl);
-      return res.status(200).json({ ok: true, connected: true, provider: 'mercado_livre', sellerId: String(me.id), nickname: String(me.nickname || '') });
+      return res.redirect(303, returnUrl || '/');
     } catch (error) {
       return res.status(error.status || 502).json({ error: 'Não foi possível concluir a conexão com o Mercado Livre.' });
     }
