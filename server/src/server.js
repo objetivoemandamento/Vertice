@@ -640,8 +640,8 @@ async function start() {
   let outboxTimer = null;
 
   if (NODE_ENV === 'production' && process.env.VERTICE_EMBED_WORKER !== 'false') {
-    const workerModule = await import('./queue/executionWorker.ts');
-    const outboxModule = await import('./outbox/publisher.ts');
+    const workerModule = require('./queue/executionWorker.ts');
+    const outboxModule = require('./outbox/publisher.ts');
     embeddedWorker = workerModule.executionWorker;
     outboxTimer = setInterval(() => {
       outboxModule.publishPendingOutbox(100).catch(error =>
