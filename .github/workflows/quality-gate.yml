@@ -20,6 +20,9 @@ jobs:
       - name: Syntax
         working-directory: server
         run: npm run check
+      - name: Mercado Livre mocked integration flow
+        working-directory: server
+        run: npm run test:mercadolivre
       - name: Kernel import
         working-directory: server
         run: npm run check:kernel
