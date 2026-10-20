@@ -1,4 +1,5 @@
 const express = require('express');
+const path = require('path');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -14,24 +15,9 @@ const { safeError, safeLog } = require('./observability/redaction');
 
 const app = express(); // execution-security audit pass 3
 app.disable('x-powered-by');
+// VÉRTICE browser dashboard: all primary user interaction happens in the website.
+app.use(express.static(path.join(__dirname, '../../web'), { index: 'index.html', maxAge: '1h' }));
 app.set('trust proxy', 1);
-
-app.get(['/download-apk','/download/vertice.apk'], async (req, res) => {
-  const apkUrl = 'https://github.com/objetivoemandamento/Vertice/releases/download/android-172/app-release.apk';
-  try {
-    const response = await fetch(apkUrl, { redirect: 'follow' });
-    if (!response.ok || !response.body) return errorJson(res, 502, 'APK indisponível no momento.');
-    res.status(200);
-    res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-    res.setHeader('Content-Disposition', 'attachment; filename="vertice-1.5.0.apk"');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    const { Readable } = require('stream');
-    Readable.fromWeb(response.body).pipe(res);
-  } catch (e) {
-    return errorJson(res, 502, 'Não foi possível disponibilizar o APK.');
-  }
-});
-
 
 const PORT = Number(process.env.PORT || 8080);
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -583,13 +569,17 @@ app.post('/ai/agent/chat', auth, async (req,res) => {
   if(!message||!['comando','operacao','monitoramento'].includes(mode)) return errorJson(res,400,'Mensagem ou modo inválido.');
 
   const key=String(process.env.VERTICE_AI_API_KEY||process.env.GROQ_API_KEY||process.env.OPENAI_API_KEY||'');
-  const base=String(process.env.VERTICE_AI_BASE_URL||(process.env.GROQ_API_KEY?'https://api.groq.com/openai/v1':process.env.OPENAI_API_KEY?'https://api.openai.com/v1':'')).replace(/\/$/,'');
+  const model=String(process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini'));
+  const usesGroq=Boolean(process.env.GROQ_API_KEY)||/^(llama-|mixtral|gemma|qwen)/i.test(model);
+  const base=String(process.env.VERTICE_AI_BASE_URL||(usesGroq?'https://api.groq.com/openai/v1':key?'https://api.openai.com/v1':'')).replace(/\/$/,'');
   const systemInstruction='Retorne somente uma proposta JSON. A IA interpreta a intenção, mas não autoriza nem executa. Formato: {"command":"comando normalizado","reason":"ação pretendida","intent":"execute"}. Não invente credenciais ou segredos.';
+  if ((!key || !base) && NODE_ENV === 'production') return errorJson(res,503,'Provedor de IA não configurado. Configure VERTICE_AI_API_KEY ou GROQ_API_KEY no servidor.','AI_PROVIDER_UNAVAILABLE');
+
   let proposal={command:message.slice(0,2000),reason:'Intenção recebida pelo VÉRTICE.',intent:'execute'};
 
   if(key&&base){
     try{
-      const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model:process.env.VERTICE_AI_MODEL||(process.env.GROQ_API_KEY?'llama-3.3-70b-versatile':'gpt-4o-mini'),temperature:0,messages:[{role:'system',content:systemInstruction},{role:'user',content:message}],response_format:{type:'json_object'}})},20000);
+      const data=await providerFetch(base,'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({model,temperature:0,messages:[{role:'system',content:systemInstruction},{role:'user',content:message}],response_format:{type:'json_object'}})},20000);
       const raw=String(data?.choices?.[0]?.message?.content||'');
       const parsed=JSON.parse(raw);
       if(parsed&&typeof parsed==='object') proposal={command:String(parsed.command||message).slice(0,2000),reason:String(parsed.reason||'Intenção recebida pelo VÉRTICE.').slice(0,1000),intent:'execute'};
@@ -631,6 +621,7 @@ app.post('/ai/agent/execute',auth,async(req,res)=>{
 app.get('/ai/agent/history',auth,async(req,res)=>{if(req.user.role==='OWNER')return res.json({ok:true,history:[]});const rows=(await query('select role,content,mode,created_at as "createdAt" from ai_conversations where user_id=$1 order by created_at desc limit 100',[req.user.sub])).rows.reverse();res.json({ok:true,history:rows});});
 
 app.get('/admin/overview',auth,ownerOnly,async(req,res)=>{const [customers,subs,devices,commands,sales]=await Promise.all([query('select count(*)::int n from users'),query("select count(*)::int n from subscriptions where status='active'"),query('select count(*)::int n from devices'),query("select count(*)::int n from commands where created_at>=current_date"),query("select coalesce(sum(amount),0) n from payments where status='paid' and to_char(created_at,'YYYY-MM')=to_char(current_date,'YYYY-MM')")]);res.json({customers:customers.rows[0].n,activeSubscriptions:subs.rows[0].n,devices:devices.rows[0].n,commandsToday:commands.rows[0].n,salesMonth:Number(sales.rows[0].n||0)});});
+app.get('/admin/sales',auth,ownerOnly,async(req,res)=>{const m=month(req.query?.month);if(!m)return errorJson(res,400,'Mês inválido.');const rows=(await query('select p.id,p.amount,p.currency_code as currency,p.provider,p.status,p.checkout_url as "checkoutUrl",p.paid_at as "paidAt",p.created_at as "createdAt",u.email as "customerEmail" from payments p left join users u on u.id=p.user_id where to_char(p.created_at,\'YYYY-MM\')=$1 order by p.created_at desc limit 500',[m])).rows;return res.json({month:m,sales:rows});});
 
 app.post('/api/v1/execution',auth,async(req,res)=>{try{const body=req.body||{};const intent={actionId:crypto.randomUUID(),tenantId:String(req.user.tenant_id||''),actorUserId:String(req.user.sub),type:String(body.type||''),resource:String(body.resource||''),operation:body.operation,payload:body.payload&&typeof body.payload==='object'?body.payload:{},idempotencyKey:String(req.headers['idempotency-key']||body.idempotencyKey||'')};if(!intent.tenantId||intent.idempotencyKey.length<16)return errorJson(res,400,'tenant_id e Idempotency-Key são obrigatórios.');const result=await enqueueExecution(intent);return res.status(result.status==='awaiting_mfa'?202:202).json({ok:true,...result});}catch(e){return errorJson(res,403,'Operação rejeitada pelo Policy Engine.','POLICY_DENIED');}});
 app.post('/api/v1/execution/:actionId/approve',auth,async(req,res)=>{if(!['OWNER','ADMIN'].includes(String(req.user.role)))return errorJson(res,403,'Aprovação administrativa necessária.');const id=String(req.params.actionId);try{const result=await withTransaction(async client=>{const task=(await client.query("select id,status,payload from tasks where id=$1 and tenant_id=$2 for update",[id,req.user.tenant_id])).rows[0];if(!task||task.status!=='awaiting_approval')throw new Error('TASK_NOT_AWAITING_APPROVAL');await client.query("update tasks set status='queued',approved_at=now(),updated_at=now() where id=$1 and tenant_id=$2",[id,req.user.tenant_id]);
