@@ -173,7 +173,7 @@ private fun VerticeApp() {
                                 marketplaceData=statusResult.exceptionOrNull()?.message ?: "Falha ao consultar conexão."
                             } else {
                                 val statusJson=statusResult.getOrThrow()
-                                if(statusJson.contains("\\"connected\\":false")) {
+                                if(statusJson.contains("\"connected\":false")) {
                                     marketplaceData="Conta ainda não conectada. Toque em CONECTAR CONTA DO MERCADO LIVRE e autorize o acesso."
                                 } else {
                                     val itemsResult=withContext(Dispatchers.IO){api.marketplaceItems(token)}
